@@ -1,0 +1,11 @@
+# Web Framework
+Flask
+# Image Processing & Manipulation
+opencv-python
+Pillow
+numpy
+# Face Recognition & AI
+insightface
+onnxruntime
+# Clustering (DBSCAN)
+scikit-learn

@@ -1,0 +1,496 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Photo Organizer</title>
+    <!-- Leaflet CSS for OpenStreetMap -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <style>
+        :root { --primary: #2563eb; --bg: #f8fafc; --sidebar: #1e293b; --text: #334155; }
+        body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; display: flex; height: 100vh; background: var(--bg); color: var(--text); overflow: hidden; }
+        
+        .sidebar { width: 240px; background: var(--sidebar); color: white; padding: 20px; display: flex; flex-direction: column; flex-shrink: 0; }
+        .nav-item { padding: 12px; cursor: pointer; border-radius: 6px; margin-bottom: 5px; transition: 0.2s; }
+        .nav-item:hover, .nav-item.active { background: #334155; }
+        
+        /* Search Box Style */
+        .search-container { margin-bottom: 20px; }
+        .search-input { 
+            width: 100%; padding: 10px; border-radius: 6px; border: none; 
+            background: #334155; color: white; box-sizing: border-box; 
+        }
+        .search-input::placeholder { color: #94a3b8; }
+        .search-input:focus { outline: 2px solid var(--primary); background: #1e293b; }
+
+        .main { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+        .toolbar { padding: 15px; background: white; border-bottom: 1px solid #e2e8f0; display: flex; gap: 10px; align-items: center;}
+        .content { flex: 1; overflow-y: auto; padding: 20px; }
+        .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 20px; }
+        
+        .card { background: white; border-radius: 8px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,0.1); cursor: pointer; transition: 0.2s; }
+        .card:hover { transform: translateY(-2px); box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1); }
+        
+        .folder-icon { width: 100%; height: 120px; padding: 20px; box-sizing: border-box; object-fit: contain; background: #f1f5f9; }
+        .photo-img { width: 100%; height: 180px; object-fit: cover; }
+        
+        .info { padding: 10px; font-size: 0.9em; }
+        .filename-text { font-weight: bold; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: block; }
+        .face-bubbles { display: flex; gap: 5px; margin-top: 5px; overflow-x: auto; }
+        .bubble { width: 25px; height: 25px; border-radius: 50%; border: 1px solid white; box-shadow: 0 1px 2px rgba(0,0,0,0.2); object-fit: cover; }
+
+        .progress-box { margin-top: auto; background: #0f172a; padding: 10px; border-radius: 6px; font-size: 0.8em; }
+        .bar-bg { background: #334155; height: 6px; border-radius: 3px; margin: 5px 0; overflow: hidden; }
+        .bar-fill { background: #22c55e; height: 100%; width: 0%; transition: width 0.3s; }
+
+        /* DETAIL VIEWER CSS */
+        .viewer-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.95); z-index: 200; display: none; color: white; }
+        .viewer-container { display: flex; width: 100%; height: 100%; }
+        
+        .viewer-main { flex: 1; position: relative; overflow: hidden; cursor: grab; background: #000; display: flex; justify-content: center; align-items: center; }
+        .viewer-main:active { cursor: grabbing; }
+        
+        .viewer-img { position: absolute; top: 0; left: 0; transform-origin: 0 0; will-change: transform; }
+        
+        .viewer-sidebar { width: 320px; background: #1e1e1e; padding: 20px; overflow-y: auto; border-left: 1px solid #333; display: flex; flex-direction: column; gap: 20px; }
+        .viewer-close { position: absolute; top: 20px; right: 20px; font-size: 2rem; cursor: pointer; z-index: 201; color: white; background: rgba(0,0,0,0.5); width: 40px; height: 40px; text-align: center; line-height: 40px; border-radius: 50%; }
+        
+        .meta-group h4 { margin: 0 0 10px 0; color: #888; font-size: 0.75rem; text-transform: uppercase; border-bottom: 1px solid #333; padding-bottom: 5px; }
+        .meta-row { display: flex; justify-content: space-between; font-size: 0.9rem; margin-bottom: 5px; word-break: break-all; }
+        .meta-val { text-align: right; color: #ddd; }
+        
+        /* Map Styles */
+        .map-frame { width: 100%; height: 200px; border-radius: 8px; margin-top: 5px; background: #333; z-index: 0; }
+        .map-btn { display: block; width: 100%; text-align: center; background: #333; color: white; padding: 8px; border-radius: 6px; text-decoration: none; font-size: 0.9rem; margin-top: 5px; border: 1px solid #444; }
+        .map-btn:hover { background: #444; }
+
+        .sidebar-face { display: flex; align-items: center; gap: 10px; background: #333; padding: 8px; border-radius: 6px; margin-bottom: 8px; }
+        .sidebar-face img { width: 32px; height: 32px; border-radius: 50%; object-fit: cover; border: 1px solid #555; }
+
+        .modal-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); display: none; justify-content: center; align-items: center; z-index: 300; }
+        .modal { background: white; padding: 25px; border-radius: 8px; width: 400px; max-width: 90%; color: #333; }
+        .btn { padding: 8px 16px; border-radius: 4px; border: none; cursor: pointer; font-weight: bold; }
+        .btn-primary { background: var(--primary); color: white; }
+        .btn-sec { background: #e2e8f0; color: #334155; }
+        input, select { width: 100%; padding: 8px; border: 1px solid #cbd5e1; border-radius: 4px; margin-bottom: 10px; box-sizing: border-box; }
+
+        /* FACE MANAGEMENT GRID */
+        .face-manage-card { position: relative; width: 120px; height: 120px; border-radius: 8px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,0.2); transition: 0.2s; }
+        .face-manage-card:hover { transform: scale(1.05); }
+        .face-manage-img { width: 100%; height: 100%; object-fit: cover; }
+        
+        /* The Red X Button */
+        .remove-face-btn { 
+            position: absolute; top: 5px; right: 5px; 
+            background: rgba(239, 68, 68, 0.9); color: white; 
+            width: 24px; height: 24px; border-radius: 50%; 
+            display: flex; align-items: center; justify-content: center; 
+            font-weight: bold; font-size: 14px; cursor: pointer; 
+            box-shadow: 0 2px 4px rgba(0,0,0,0.3);
+            border: 1px solid white;
+            z-index: 10;
+        }
+        .remove-face-btn:hover { background: #dc2626; }
+
+        /* SELECTION MODE STYLES */
+        .card.selected { border: 3px solid var(--primary); background: #eff6ff; }
+        .check-overlay {
+            position: absolute; top: 10px; right: 10px; width: 24px; height: 24px; border-radius: 50%;
+            background: var(--primary); color: white; display: none; align-items: center; justify-content: center;
+            font-weight: bold; border: 2px solid white; box-shadow: 0 2px 4px rgba(0,0,0,0.2); z-index: 10;
+        }
+        .card.selected .check-overlay { display: flex; }
+    </style>
+    <!-- Leaflet JS -->
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+</head>
+<body>
+
+    <div class="sidebar">
+        <h2 style="margin-top:0">📸 Library</h2>
+        
+        <!-- SEARCH BAR -->
+        <div class="search-container">
+            <input type="text" id="searchInput" class="search-input" 
+                   placeholder="Search names, places, dates..." 
+                   onkeydown="handleSearch(event)">
+        </div>
+
+        <div class="nav-item" id="nav-albums" onclick="loadDirectories()">📁 Albums</div>
+        <div class="nav-item" id="nav-people" onclick="loadPeople()">👥 People</div>
+        
+        <div class="progress-box">
+            <div style="display:flex; justify-content:space-between"><span>Scanner</span><span id="pct">0%</span></div>
+            <div class="bar-bg"><div class="bar-fill" id="pbar"></div></div>
+            <div id="pstatus" style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis">Idle</div>
+            <button class="btn btn-primary" id="scanBtn" style="width:100%; margin-top:10px; font-size:0.9em" onclick="startRefresh()">🔄 Refresh Library</button>
+        </div>
+    </div>
+
+    <div class="main">
+        <div class="toolbar" id="toolbar"></div>
+        <div class="content" id="content"></div>
+    </div>
+
+    <!-- VIEWER -->
+    <div class="viewer-overlay" id="viewerOverlay">
+        <div class="viewer-close" onclick="closeViewer()">×</div>
+        <div class="viewer-container">
+            <div class="viewer-main" id="viewerMain">
+                <img id="detailImg" class="viewer-img">
+            </div>
+            
+            <div class="viewer-sidebar">
+                <div class="meta-group">
+                    <h4>Image Info</h4>
+                    <div class="meta-row"><span>File</span> <span class="meta-val" id="dFileName">-</span></div>
+                    <div class="meta-row"><span>Created</span> <span class="meta-val" id="dCreated">-</span></div>
+                </div>
+
+                <div class="meta-group">
+                    <h4>Location</h4>
+                    <div class="meta-row" style="display:block">
+                        <div id="dFolder" style="margin-bottom:5px; color:#ddd"></div>
+                        <div id="leafletMap" class="map-frame" style="display:none"></div>
+                        <a id="appleMapsLink" href="#" target="_blank" class="map-btn">🗺️ Open in Apple Maps</a>
+                    </div>
+                </div>
+
+                <div class="meta-group">
+                    <h4>EXIF Data</h4>
+                    <div id="dExif"></div>
+                </div>
+
+                <div class="meta-group">
+                    <h4>People</h4>
+                    <div id="dFaces"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- EDIT MODAL -->
+    <div class="modal-overlay" id="editModal">
+        <div class="modal">
+            <h3>Edit Person</h3>
+            <input type="hidden" id="editId">
+            <label>Name</label><input type="text" id="editName">
+            <label>Gender</label>
+            <select id="editGender"><option value="Unknown">Unknown</option><option value="Male">Male</option><option value="Female">Female</option></select>
+            <hr style="border:0; border-top:1px solid #eee; margin:15px 0"><label style="color:red">Merge into...</label>
+            <select id="mergeTarget"><option value="">-- Do not merge --</option></select>
+            <div style="display:flex; justify-content:space-between; margin-top:20px">
+                <button class="btn" style="background:#ef4444; color:white" onclick="deletePerson()">Delete Person</button>
+                <div style="display:flex; gap:10px">
+                    <button class="btn btn-sec" onclick="closeModal()">Cancel</button>
+                    <button class="btn btn-primary" onclick="savePerson()">Save</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+<script>
+        // --- REUSABLE PHOTO GRID RENDERER ---
+        function renderPhotoGrid(photos, titleHtml) {
+            setToolbar(titleHtml);
+            
+            if (photos.length === 0) {
+                document.getElementById('content').innerHTML = '<div style="text-align:center; padding:20px; color:#666">No photos found.</div>';
+                return;
+            }
+
+            let html = '<div class="grid">';
+            photos.forEach(p => {
+                let faces = p.faces.map(f => `
+                    <img src="/api/face_crop/${f.md5}/${f.face_id}" 
+                        class="bubble" title="${f.name}" 
+                        onerror="this.src='static/img/people.png'">
+                `).join('');
+                
+                html += `
+                    <div class="card" onclick="openViewer('${p.md5}')">
+                        <img src="${p.url}" class="photo-img" loading="lazy">
+                        <div class="info">
+                            <span class="filename-text" title="${p.filename}">${p.filename}</span>
+                            <div class="face-bubbles">${faces}</div>
+                        </div>
+                    </div>`;
+            });
+            document.getElementById('content').innerHTML = html + '</div>';
+        }
+
+        // --- SEARCH LOGIC ---
+        async function handleSearch(e) {
+            if (e.key === 'Enter') {
+                const q = document.getElementById('searchInput').value;
+                if (!q) return;
+                
+                setActiveNav(''); 
+                document.getElementById('content').innerHTML = 'Searching...';
+                
+                const res = await fetch(`/api/search?q=${encodeURIComponent(q)}`);
+                const photos = await res.json();
+                
+                renderPhotoGrid(photos, `<span style="font-weight:bold">Search Results: "${q}" (${photos.length})</span>`);
+            }
+        }
+
+        // --- NAVIGATION ---
+        function setActiveNav(id) {
+            document.querySelectorAll('.nav-item').forEach(e => e.classList.remove('active'));
+            if(id) document.getElementById(id).classList.add('active');
+        }
+
+        async function loadDirectories() {
+            setActiveNav('nav-albums');
+            setToolbar('Albums');
+            const res = await fetch('/api/directories');
+            const dirs = await res.json();
+            let html = '<div class="grid">';
+            dirs.forEach(d => {
+                html += `<div class="card" onclick="loadPhotos('${d.name}')"><img src="static/img/folder.png" class="folder-icon"><div class="info"><div style="font-weight:bold">${d.name}</div><div style="color:#666">${d.count} items</div></div></div>`;
+            });
+            document.getElementById('content').innerHTML = html + '</div>';
+        }
+
+        async function loadPhotos(folderName) {
+            const res = await fetch(`/api/photos_by_dir?folder=${encodeURIComponent(folderName)}`);
+            const photos = await res.json();
+            renderPhotoGrid(photos, `<button class="btn btn-sec" onclick="loadDirectories()">⬅ Back</button><span style="font-weight:bold; margin-left:10px">${folderName}</span>`);
+        }
+
+        // --- PEOPLE & SELECTION ---
+        let isSelectionMode = false;
+        let selectedPeople = new Set();
+
+        async function loadPeople() {
+            setActiveNav('nav-people');
+            let toolbarHtml = 'People Library';
+            if (isSelectionMode) {
+                toolbarHtml = `
+                    <button class="btn btn-sec" onclick="toggleSelectionMode()">Cancel Selection</button>
+                    <span style="font-weight:bold; margin-left:10px">${selectedPeople.size} Selected</span>
+                    <button class="btn" style="background:#ef4444; color:white; margin-left:auto" 
+                            onclick="bulkDelete()" ${selectedPeople.size === 0 ? 'disabled' : ''}>
+                        Delete Selected (${selectedPeople.size})
+                    </button>`;
+            } else {
+                toolbarHtml = `<span style="font-weight:bold; margin-right:auto">People Library</span><button class="btn btn-primary" onclick="toggleSelectionMode()">Select Multiple</button>`;
+            }
+            setToolbar(toolbarHtml);
+
+            const res = await fetch('/api/people');
+            allPeople = await res.json();
+            let html = '<div class="grid">';
+            allPeople.forEach(p => {
+                const isSel = selectedPeople.has(p.id);
+                const clickAction = isSelectionMode ? `togglePerson('${p.id}')` : `loadPersonDetail('${p.id}', '${p.name}')`;
+                html += `
+                    <div class="card ${isSel?'selected':''}" style="text-align:center; padding:15px; position:relative" onclick="${clickAction}">
+                        <div class="check-overlay">✓</div>
+                        <img src="${p.avatar_url}" style="width:100px; height:100px; border-radius:50%; object-fit:cover" onerror="this.src='static/img/people.svg'">
+                        <div style="font-weight:bold; margin:10px 0">${p.name}</div>
+                        <div style="color:#666; font-size:0.8em">${p.gender} • ${p.count} photos</div>
+                        ${!isSelectionMode ? `<button class="btn btn-sec" style="margin-top:10px" onclick="event.stopPropagation(); openEdit('${p.id}')">Edit</button>` : ''}
+                    </div>`;
+            });
+            document.getElementById('content').innerHTML = html + '</div>';
+        }
+
+        function toggleSelectionMode() { isSelectionMode = !isSelectionMode; selectedPeople.clear(); loadPeople(); }
+        function togglePerson(id) { if(selectedPeople.has(id)) selectedPeople.delete(id); else selectedPeople.add(id); loadPeople(); }
+        
+        async function bulkDelete() {
+            if(selectedPeople.size===0) return;
+            if(!confirm(`Delete ${selectedPeople.size} people?`)) return;
+            setToolbar('Deleting...');
+            await fetch('/api/delete_people_bulk', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ids:Array.from(selectedPeople)})});
+            isSelectionMode = false; selectedPeople.clear(); loadPeople();
+        }
+
+        // --- PERSON DETAIL ---
+        async function loadPersonDetail(personId, personName) {
+            setToolbar(`<button class="btn btn-sec" onclick="loadPeople()">⬅ Back</button><span style="font-weight:bold; margin-left:10px">${personName}</span>`);
+            const res = await fetch(`/api/faces_by_person/${personId}`);
+            const faces = await res.json();
+            let html = '<div class="grid" style="grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));">';
+            faces.forEach(f => {
+                html += `<div class="face-manage-card" id="face-${f.face_id}"><div class="remove-face-btn" onclick="removeFace('${f.md5}', '${f.face_id}', event)">✕</div><img src="${f.url}" class="face-manage-img" onclick="openViewer('${f.md5}')"></div>`;
+            });
+            document.getElementById('content').innerHTML = html + '</div>';
+        }
+
+        async function removeFace(md5, faceId, event) {
+            event.stopPropagation();
+            if(!confirm("Remove face?")) return;
+            if((await (await fetch('/api/remove_face_from_cluster', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({md5, face_id:faceId})})).json()).success) document.getElementById('face-'+faceId).remove();
+        }
+
+        // --- VIEWER & ZOOM ---
+        let scale = 1, pointX = 0, pointY = 0, startX = 0, startY = 0, isPanning = false;
+        const imgEl = document.getElementById('detailImg');
+        const viewMain = document.getElementById('viewerMain');
+        const MIN_SCALE = 0.1, MAX_SCALE = 10;
+
+        function updateTransform() { imgEl.style.transform = `translate(${pointX}px, ${pointY}px) scale(${scale})`; }
+        function resetZoom() {
+            if (!imgEl.naturalWidth) return;
+            const vw = viewMain.clientWidth, vh = viewMain.clientHeight;
+            const iw = imgEl.naturalWidth, ih = imgEl.naturalHeight;
+            let fitScale = Math.min(vw / iw, vh / ih);
+            if (fitScale > 1) fitScale = 1;
+            scale = fitScale * 0.95;
+            pointX = (vw - (iw * scale)) / 2;
+            pointY = (vh - (ih * scale)) / 2;
+            updateTransform();
+        }
+        viewMain.addEventListener('wheel', (e) => {
+            e.preventDefault();
+            const rect = viewMain.getBoundingClientRect();
+            const mouseX = e.clientX - rect.left, mouseY = e.clientY - rect.top;
+            const xs = (mouseX - pointX) / scale, ys = (mouseY - pointY) / scale;
+            const delta = -Math.sign(e.deltaY) * 0.15;
+            let newScale = Math.min(Math.max(MIN_SCALE, scale + (scale * delta)), MAX_SCALE);
+            pointX = mouseX - (xs * newScale);
+            pointY = mouseY - (ys * newScale);
+            scale = newScale;
+            updateTransform();
+        });
+        viewMain.addEventListener('mousedown', (e) => {
+            if(e.target === viewMain || e.target === imgEl) { isPanning = true; startX = e.clientX - pointX; startY = e.clientY - pointY; viewMain.style.cursor = 'grabbing'; }
+        });
+        window.addEventListener('mousemove', (e) => { if (isPanning) { e.preventDefault(); pointX = e.clientX - startX; pointY = e.clientY - startY; updateTransform(); }});
+        window.addEventListener('mouseup', () => { isPanning = false; viewMain.style.cursor = 'grab'; });
+
+        function openViewer(md5) {
+            document.getElementById('viewerOverlay').style.display = 'block';
+            imgEl.style.opacity = '0';
+            imgEl.src = `/image_by_md5/${md5}`;
+            imgEl.onload = () => { resetZoom(); imgEl.style.opacity = '1'; };
+            fetchDetails(md5);
+        }
+        
+        async function fetchDetails(md5) {
+            const res = await fetch(`/api/photo_details/${md5}`);
+            if(res.ok) {
+                const data = await res.json();
+                document.getElementById('dFileName').innerText = data.filename;
+                document.getElementById('dCreated').innerText = data.created;
+                let locName = data.folder !== data.location ? data.folder : data.location;
+                document.getElementById('dFolder').innerText = locName;
+                const appleBtn = document.getElementById('appleMapsLink');
+                const mapC = document.getElementById('leafletMap');
+                if (data.gps) {
+                    document.getElementById('dFolder').innerHTML += ' <span style="font-size:0.7em; background:#22c55e; color:white; padding:2px 4px; border-radius:4px; margin-left:5px">GPS</span>';
+                    const [lat, lon] = data.gps.split(',');
+                    initMap(parseFloat(lat), parseFloat(lon));
+                    appleBtn.href = `http://maps.apple.com/?q=${lat},${lon}`;
+                    appleBtn.innerText = "🗺️ Open in Apple Maps (Exact)";
+                    mapC.style.display = 'block';
+                } else {
+                    mapC.style.display = 'none';
+                    appleBtn.href = `http://maps.apple.com/?q=${encodeURIComponent(locName)}`;
+                    appleBtn.innerText = `🗺️ Search "${locName}" in Apple Maps`;
+                }
+                let exifHtml = '';
+                if(data.exif) for(const [k,v] of Object.entries(data.exif)) exifHtml+=`<div class="meta-row"><span>${k}</span> <span class="meta-val">${v}</span></div>`;
+                document.getElementById('dExif').innerHTML = exifHtml || "No EXIF";
+                let faceHtml = '';
+                if(data.faces && data.faces.length > 0) {
+                    data.faces.forEach(f => {
+                        faceHtml += `<div class="sidebar-face"><img src="/api/face_crop/${f.md5}/${f.face_id}"><span>${f.name}</span></div>`;
+                    });
+                } else {
+                    faceHtml = "<div style='color:#666'>No people detected</div>";
+                }
+                document.getElementById('dFaces').innerHTML = faceHtml;
+            }
+        }
+        function closeViewer() { document.getElementById('viewerOverlay').style.display = 'none'; imgEl.src=''; document.getElementById('leafletMap').style.display='none'; }
+        
+        // --- MAP ---
+        let mapInstance = null;
+        function initMap(lat, lon) {
+            const el = document.getElementById('leafletMap'); el.style.display = 'block';
+            if (mapInstance) mapInstance.remove();
+            mapInstance = L.map('leafletMap').setView([lat, lon], 13);
+            L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(mapInstance);
+            L.marker([lat, lon]).addTo(mapInstance);
+        }
+
+        // --- UTILS ---
+        let allPeople = [];
+        function setToolbar(html) { document.getElementById('toolbar').innerHTML = html; }
+        
+        // --- EDIT ---
+        function openEdit(id) {
+            const p = allPeople.find(x => x.id === id); if(!p) return;
+            document.getElementById('editId').value = p.id;
+            document.getElementById('editName').value = p.name;
+            document.getElementById('editGender').value = p.gender;
+            const sel = document.getElementById('mergeTarget');
+            sel.innerHTML = '<option value="">-- Do not merge --</option>';
+            allPeople.forEach(ap => { if(ap.id !== id) sel.innerHTML += `<option value="${ap.id}">${ap.name} (${ap.count})</option>`; });
+            document.getElementById('editModal').style.display = 'flex';
+        }
+        function closeModal() { document.getElementById('editModal').style.display='none'; }
+        async function savePerson() {
+            const id = document.getElementById('editId').value, tid = document.getElementById('mergeTarget').value;
+            if(tid) { if(!confirm("Merge?")) return; await fetch('/api/merge_people', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({source_id:id, target_id:tid})}); }
+            else { await fetch('/api/update_person', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({id, name:document.getElementById('editName').value, gender:document.getElementById('editGender').value})}); }
+            closeModal(); loadPeople();
+        }
+        async function deletePerson() {
+            const id = document.getElementById('editId').value;
+            if(!confirm("Delete person?")) return;
+            await fetch('/api/delete_person', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({id})});
+            closeModal(); loadPeople();
+        }
+
+        // --- STATUS POLL ---
+        let pollTimer;
+        
+        async function startRefresh() {
+            try {
+                // Try to trigger scan
+                const res = await fetch('/api/refresh_library');
+                const data = await res.json();
+                
+                // If started or already busy, we start polling UI
+                if(data.status !== 'error') {
+                    document.getElementById('scanBtn').disabled = true;
+                    if (pollTimer) clearInterval(pollTimer); // clear existing
+                    
+                    pollTimer = setInterval(async () => {
+                        try {
+                            const r = await fetch('/api/scan_status');
+                            const s = await r.json();
+                            document.getElementById('pbar').style.width = s.progress+'%';
+                            document.getElementById('pct').innerText = s.progress+'%';
+                            document.getElementById('pstatus').innerText = s.current_task;
+                            
+                            // If finished
+                            if(!s.is_scanning && s.progress===100) {
+                                clearInterval(pollTimer);
+                                document.getElementById('scanBtn').disabled = false;
+                                document.getElementById('pstatus').innerText = "Ready";
+                                loadDirectories(); // Refresh views
+                            }
+                        } catch(e) { console.error(e); }
+                    }, 1000);
+                }
+            } catch(e) { console.error("Auto-start failed", e); }
+        }
+
+        // --- INITIALIZATION ---
+        function init() {
+            // Load content
+            loadDirectories();
+            // Auto-Start Scanning/Indexing
+            startRefresh();
+        }
+
+        init();
+    </script>
+</body>
+</html>
