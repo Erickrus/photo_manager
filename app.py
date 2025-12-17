@@ -596,7 +596,7 @@ def serve_crop(md5, face_id):
                 frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 img = Image.fromarray(frame)
         else:
-            img = Image.open(path)
+            img = Image.open(path).convert("RGB")
             img = ImageOps.exif_transpose(img)
         
         if img:
