@@ -136,6 +136,36 @@
         .map-frame { width: 100%; height: 200px; border-radius: 8px; margin-top: 5px; background: #333; }
         .map-btn { display: block; width: 100%; text-align: center; background: #333; color: white; padding: 8px; border-radius: 6px; text-decoration: none; font-size: 0.9rem; margin-top: 5px; border: 1px solid #444; }
         input, select { width: 100%; padding: 8px; border: 1px solid #cbd5e1; border-radius: 4px; margin-bottom: 10px; box-sizing: border-box; }
+    
+        .nav-arrow {
+            position: absolute;
+            top: 50%;
+            transform: translateY(-50%);
+            width: 50px;
+            height: 100px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            color: rgba(255, 255, 255, 0.5);
+            font-size: 40px;
+            user-select: none;
+            z-index: 10010; /* Above image but below sidebar if needed */
+            transition: 0.2s;
+            border-radius: 8px;
+        }
+        .nav-arrow:hover {
+            background: rgba(255, 255, 255, 0.1);
+            color: white;
+        }
+        .nav-prev { left: 10px; }
+        .nav-next { right: 10px; }
+
+        /* Hide arrows on mobile if needed, or make them smaller */
+        @media (max-width: 768px) {
+            .nav-arrow { width: 40px; font-size: 30px; }
+        }
+    
     </style>
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
     <script src="https://unpkg.com/leaflet.markercluster@1.4.1/dist/leaflet.markercluster.js"></script>
@@ -167,6 +197,8 @@
         <div class="viewer-close" onclick="closeViewer()">×</div>
         <div class="viewer-container">
             <div class="viewer-main" id="viewerMain">
+                <div class="nav-arrow nav-prev" onclick="navigateViewer(-1)">&#10094;</div>
+                <div class="nav-arrow nav-next" onclick="navigateViewer(1)">&#10095;</div>
                 <img id="detailImg" class="viewer-img">
                 <video id="detailVideo" class="viewer-video" controls style="display:none"></video>
             </div>
@@ -228,7 +260,7 @@
 // --- GLOBAL MAP (FIXED ANCHOR & NOTIFICATION BADGE) ---
         async function loadGlobalMap() {
             setActiveNav('nav-map');
-            setToolbar('Map View');
+            setToolbar('Map');
             document.getElementById('content').innerHTML = '<div id="global-map"></div>';
             
             const map = L.map('global-map').setView([20, 0], 2);
@@ -271,6 +303,8 @@
             
             const res = await fetch('/api/map_all');
             const points = await res.json();
+
+            currentPlaylist = points; 
             
             points.forEach(p => {
                 // Single Marker Icon
@@ -280,7 +314,7 @@
                     icon: icon,
                     customData: { thumb: p.thumb, created: p.created } 
                 });
-                
+
                 m.on('click', () => openViewer(p.md5));
                 markers.addLayer(m);
             });
@@ -290,6 +324,8 @@
         }
         // --- GRID RENDERER ---
         function renderPhotoGrid(photos, title) {
+            currentPlaylist = photos; 
+
             setToolbar(title);
             if (photos.length===0) { document.getElementById('content').innerHTML='<div style="padding:20px">No items.</div>'; return; }
             let html = '<div class="grid">';
@@ -307,6 +343,30 @@
             });
             document.getElementById('content').innerHTML = html + '</div>';
         }
+
+        function navigateViewer(direction) {
+            if (currentIdx === -1 || currentPlaylist.length === 0) return;
+
+            // Calculate new index
+            let newIdx = currentIdx + direction;
+
+            // Optional: Loop functionality (Last -> First)
+            if (newIdx >= currentPlaylist.length) newIdx = 0;
+            if (newIdx < 0) newIdx = currentPlaylist.length - 1;
+
+            // Open the new photo
+            const nextItem = currentPlaylist[newIdx];
+            openViewer(nextItem.md5);
+        }
+
+        // Add Keyboard Support (Left/Right Arrows)
+        document.addEventListener('keydown', function(e) {
+            if (document.getElementById('viewerOverlay').style.display === 'block') {
+                if (e.key === "ArrowLeft") navigateViewer(-1);
+                if (e.key === "ArrowRight") navigateViewer(1);
+                if (e.key === "Escape") closeViewer();
+            }
+        });
 
         // --- VIEWER & ZOOM (FIXED SCALING) ---
         let sc=1,px=0,py=0,sx=0,sy=0,pan=false; 
@@ -354,7 +414,14 @@
         window.onmousemove=e=>{ if(pan){ e.preventDefault(); px=e.clientX-sx; py=e.clientY-sy; upT(); }};
         window.onmouseup=()=>{ pan=false; vm.style.cursor='grab'; };
 
+        // --- GLOBAL VIEWER STATE ---
+        let currentPlaylist = []; // Stores the array of photo objects currently on screen
+        let currentIdx = -1;      // Tracks which index we are viewing
+
         function openViewer(md5) {
+
+            currentIdx = currentPlaylist.findIndex(p => p.md5 === md5);
+
             document.getElementById('viewerOverlay').style.display = 'block';
             const img = document.getElementById('detailImg');
             const vid = document.getElementById('detailVideo');
@@ -426,7 +493,7 @@
         function setActiveNav(id) { document.querySelectorAll('.nav-item').forEach(e=>e.classList.remove('active')); if(id) document.getElementById(id).classList.add('active'); }
         function setToolbar(html) { document.getElementById('toolbar').innerHTML = html; }
         
-        async function loadDirectories() { setActiveNav('nav-albums'); const d = await (await fetch('/api/directories')).json(); let h='<div class="grid">'; d.forEach(x=>h+=`<div style="cursor:pointer" onclick="loadPhotos('${x.name}')"><div class="album-card"><img src="${x.cover}" class="album-cover" loading="lazy"><div class="album-badge">${x.count}</div></div><div class="album-title">${x.name}</div></div>`); document.getElementById('content').innerHTML=h+'</div>'; }
+        async function loadDirectories() { setToolbar('Albums');setActiveNav('nav-albums'); const d = await (await fetch('/api/directories')).json(); let h='<div class="grid">'; d.forEach(x=>h+=`<div style="cursor:pointer" onclick="loadPhotos('${x.name}')"><div class="album-card"><img src="${x.cover}" class="album-cover" loading="lazy"><div class="album-badge">${x.count}</div></div><div class="album-title">${x.name}</div></div>`); document.getElementById('content').innerHTML=h+'</div>'; }
         
         async function loadPhotos(folder) { const p = await (await fetch(`/api/photos_by_dir?folder=${encodeURIComponent(folder)}`)).json(); renderPhotoGrid(p, `<button class="btn btn-sec" onclick="loadDirectories()">⬅ Back</button> <b>${folder}</b>`); }
         async function handleSearch(e) { if(e.key==='Enter'){ const q=document.getElementById('searchInput').value; if(q){ setActiveNav(''); const p = await (await fetch(`/api/search?q=${encodeURIComponent(q)}`)).json(); renderPhotoGrid(p, `Results: "${q}"`); }}}
@@ -471,13 +538,7 @@
         // --- MAP UTILS ---
         let mapI=null; function initMap(lat,lon){ const e=document.getElementById('leafletMap'); e.style.display='block'; if(mapI)mapI.remove(); mapI=L.map('leafletMap').setView([lat,lon],13); L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(mapI); L.marker([lat,lon]).addTo(mapI); }
         
-        // --- EDIT/DELETE ---
         let allPeople=[]; 
-        //function openEdit(id) { fetch('/api/people').then(r=>r.json()).then(data=>{ allPeople=data; const p=allPeople.find(x=>x.id===id); document.getElementById('editId').value=p.id; document.getElementById('editName').value=p.name; document.getElementById('editGender').value=p.gender; const s=document.getElementById('mergeTarget'); s.innerHTML='<option value="">-- No --</option>'; allPeople.forEach(ap=>{if(ap.id!==id)s.innerHTML+=`<option value="${ap.id}">${ap.name}</option>`}); document.getElementById('editModal').style.display='flex'; }); }
-        // Add these hidden inputs to your HTML Modal if they aren't there:
-        // <input type="hidden" id="editMd5">
-        // <input type="hidden" id="editFaceId">
-
         async function openEdit(clusterId, md5, faceId) {
             // 1. Store the specific face details (crucial for Unknowns)
             document.getElementById('editMd5').value = md5 || "";
@@ -591,10 +652,26 @@
             }
 
             closeModal();
-            openViewer(md5); // Refresh view
+            // Check if we are currently inside the Viewer
+            const isViewerOpen = document.getElementById('viewerOverlay').style.display === 'block';
+
+            if (isViewerOpen) {
+                // SCENARIO A: We are in the Viewer.
+                // Re-open the CURRENT photo to refresh the names in the sidebar.
+                // We use the 'md5' hidden field which stores the photo we were looking at.
+                if (md5) openViewer(md5);
+            } else {
+                // SCENARIO B: We are in the People Grid (or Map, or Album).
+                // Do NOT open the viewer. 
+                // Just refresh the background grid so the name/avatar updates.
+                loadPeople(); 
+            }
         }
         async function deletePerson() { const id=document.getElementById('editId').value; if(!confirm("Delete?")) return; await fetch('/api/delete_person', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:document.getElementById('editId').value})}); closeModal(); loadPeople(); }
         async function removeFace(md5, fid, e) { e.stopPropagation(); if(confirm('Remove?')) if((await (await fetch('/api/remove_face_from_cluster', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({md5, face_id:fid})})).json()).success) document.getElementById('face-'+fid).remove(); }
+
+
+
 
         // --- INIT ---
         let pt; async function startRefresh() { const r=await (await fetch('/api/refresh_library')).json(); if(r.status!=='error'){ document.getElementById('scanBtn').disabled=true; pt=setInterval(async()=>{ const s=await (await fetch('/api/scan_status')).json(); document.getElementById('pbar').style.width=s.progress+'%'; document.getElementById('pct').innerText=s.progress+'%'; document.getElementById('pstatus').innerText=s.current_task; if(!s.is_scanning && s.progress===100){ clearInterval(pt); document.getElementById('scanBtn').disabled=false; loadDirectories(); } }, 1000); }}
