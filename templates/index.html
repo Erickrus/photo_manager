@@ -107,12 +107,20 @@
             object-position: center; /* Added */
             border: 1px solid #555; 
         }
-
         .face-manage-img { 
             width: 100%; height: 100%; 
             object-fit: cover; 
             object-position: center; /* Added */
         }
+
+        .sidebar-face { 
+            display: flex; align-items: center; gap: 10px; margin-bottom: 10px; 
+            cursor: pointer; /* Added */
+            transition: background 0.2s;
+            padding: 5px;
+            border-radius: 4px;
+        }
+        .sidebar-face:hover { background: rgba(255,255,255,0.1); }
         .modal-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); display: none; justify-content: center; align-items: center; z-index: 10005; }
         .modal { background: white; padding: 25px; border-radius: 8px; width: 400px; max-width: 90%; color: #333; }
         .btn { padding: 8px 16px; border-radius: 4px; border: none; cursor: pointer; font-weight: bold; }
@@ -210,6 +218,8 @@
                     <button class="btn btn-primary" onclick="savePerson()">Save</button>
                 </div>
             </div>
+            <input type="hidden" id="editMd5">
+            <input type="hidden" id="editFaceId">
         </div>
     </div>
 
@@ -348,47 +358,62 @@
             document.getElementById('viewerOverlay').style.display = 'block';
             const img = document.getElementById('detailImg');
             const vid = document.getElementById('detailVideo');
+            const mapContainer = document.getElementById('leafletMap');
             
+            // Reset
             img.style.display = 'block'; img.style.opacity = '0';
             vid.style.display = 'none'; vid.src = '';
-            
-            fetch(`/api/photo_details/${md5}`).then(r=>r.json()).then(data => {
-                if (data.is_video) {
-                    img.style.display = 'none';
-                    vid.style.display = 'block';
-                    vid.src = `/image_by_md5/${md5}`;
-                    vid.play();
-                } else {
-                    vid.style.display = 'none';
-                    img.style.display = 'block';
-                    img.src = `/image_by_md5/${md5}`;
-                    img.onload = () => { resetZoom(); img.style.opacity='1'; };
-                }
-                
-                document.getElementById('dFileName').innerText = data.filename;
-                document.getElementById('dCreated').innerText = data.created;
-                document.getElementById('dFolder').innerText = data.location;
-                
-                const mapC = document.getElementById('leafletMap');
-                const appleBtn = document.getElementById('appleMapsLink');
-                if(data.gps) {
-                    const [lat, lon] = data.gps.split(',');
-                    initMap(parseFloat(lat), parseFloat(lon));
-                    mapC.style.display='block';
-                    appleBtn.href = `http://maps.apple.com/?q=${lat},${lon}`;
-                } else {
-                    mapC.style.display='none';
-                    appleBtn.href = `http://maps.apple.com/?q=${encodeURIComponent(data.location)}`;
-                }
-                
-                let fHtml = '';
-                if(data.faces) data.faces.forEach(f => {
-                    fHtml += `<div class="sidebar-face"><img src="/api/face_crop/${f.md5}/${f.face_id}"><span>${f.name}</span></div>`;
-                });
-                document.getElementById('dFaces').innerHTML = fHtml || "<div style='color:#666'>No people</div>";
-            });
-        }
+            mapContainer.style.display = 'none';
+            document.getElementById('dFaces').innerHTML = 'Loading...';
 
+            fetch(`/api/photo_details/${md5}`)
+                .then(r => r.json())
+                .then(data => {
+                    // ... (Keep existing Video/Image/Map logic) ...
+                    if (data.is_video) {
+                        img.style.display = 'none'; vid.style.display = 'block'; vid.src = `/image_by_md5/${md5}`; vid.play();
+                    } else {
+                        vid.style.display = 'none'; img.style.display = 'block'; img.src = `/image_by_md5/${md5}`; 
+                        img.onload = () => { resetZoom(); img.style.opacity = '1'; };
+                    }
+                    
+                    document.getElementById('dFileName').innerText = data.filename;
+                    document.getElementById('dCreated').innerText = data.created;
+
+                    const mapC = document.getElementById('leafletMap');
+                    const appleBtn = document.getElementById('appleMapsLink');
+                    if(data.gps) {
+                        const [lat, lon] = data.gps.split(',');
+                        initMap(parseFloat(lat), parseFloat(lon));
+                        mapC.style.display='block';
+                        appleBtn.href = `http://maps.apple.com/?q=${lat},${lon}`;
+                    } else {
+                        mapC.style.display='none';
+                        appleBtn.href = `http://maps.apple.com/?q=${encodeURIComponent(data.location)}`;
+                    }
+                    // --- FIXED FACE LOGIC ---
+                    let fHtml = '';
+                    if (data.faces && data.faces.length > 0) {
+                        data.faces.forEach(f => {
+                            const isUnknown = f.cluster_id === "-1";
+                            // Style: "Unknown" gets a dashed border or different opacity
+                            const borderStyle = isUnknown ? "2px dashed #777" : "2px solid transparent";
+                            
+                            // CRITICAL: We pass cluster_id, md5, AND face_id
+                            fHtml += `
+                                <div class="sidebar-face" 
+                                    onclick="openEdit('${f.cluster_id}', '${f.md5}', '${f.face_id}')" 
+                                    title="${isUnknown ? 'Click to Identify' : 'Edit Person'}"
+                                    style="cursor:pointer; display:flex; align-items:center; gap:10px; margin-bottom:8px; padding:4px; border-radius:4px; border:${borderStyle}">
+                                    <img src="/api/face_crop/${f.md5}/${f.face_id}" style="width:32px; height:32px; border-radius:50%; object-fit:cover;">
+                                    <span>${f.name}</span>
+                                </div>
+                            `;
+                        });
+                    }
+                    document.getElementById('dFaces').innerHTML = fHtml || "<div style='color:#666'>No people detected</div>";
+                });
+        }
         function closeViewer() { 
             document.getElementById('viewerOverlay').style.display = 'none'; 
             document.getElementById('detailImg').src=''; 
@@ -448,9 +473,126 @@
         
         // --- EDIT/DELETE ---
         let allPeople=[]; 
-        function openEdit(id) { fetch('/api/people').then(r=>r.json()).then(data=>{ allPeople=data; const p=allPeople.find(x=>x.id===id); document.getElementById('editId').value=p.id; document.getElementById('editName').value=p.name; document.getElementById('editGender').value=p.gender; const s=document.getElementById('mergeTarget'); s.innerHTML='<option value="">-- No --</option>'; allPeople.forEach(ap=>{if(ap.id!==id)s.innerHTML+=`<option value="${ap.id}">${ap.name}</option>`}); document.getElementById('editModal').style.display='flex'; }); }
+        //function openEdit(id) { fetch('/api/people').then(r=>r.json()).then(data=>{ allPeople=data; const p=allPeople.find(x=>x.id===id); document.getElementById('editId').value=p.id; document.getElementById('editName').value=p.name; document.getElementById('editGender').value=p.gender; const s=document.getElementById('mergeTarget'); s.innerHTML='<option value="">-- No --</option>'; allPeople.forEach(ap=>{if(ap.id!==id)s.innerHTML+=`<option value="${ap.id}">${ap.name}</option>`}); document.getElementById('editModal').style.display='flex'; }); }
+        // Add these hidden inputs to your HTML Modal if they aren't there:
+        // <input type="hidden" id="editMd5">
+        // <input type="hidden" id="editFaceId">
+
+        async function openEdit(clusterId, md5, faceId) {
+            // 1. Store the specific face details (crucial for Unknowns)
+            document.getElementById('editMd5').value = md5 || "";
+            document.getElementById('editFaceId').value = faceId || "";
+
+            // 2. Prepare the Modal
+            const modal = document.getElementById('editModal');
+            const nameInput = document.getElementById('editName');
+            const genderInput = document.getElementById('editGender');
+            const avatar = document.getElementById('editAvatar');
+            const mergeSel = document.getElementById('mergeTarget');
+            
+            // Default State
+            modal.style.display = 'flex';
+            mergeSel.innerHTML = '<option>Loading...</option>';
+
+            // 3. Logic Branch: Existing Person vs Unknown
+            if (clusterId === "-1") {
+                // --- UNKNOWN MODE ---
+                document.getElementById('editId').value = "-1"; // Marker for "New"
+                nameInput.value = "";
+                nameInput.placeholder = "Enter Name for New Person...";
+                genderInput.value = "Unknown";
+                
+                // Use the crop of the face we just clicked as the preview
+                avatar.src = `/api/face_crop/${md5}/${faceId}`;
+                
+                // Helper text
+                document.querySelector('.modal h3').innerText = "Identify Person";
+            } else {
+                // --- EDIT EXISTING MODE ---
+                document.querySelector('.modal h3').innerText = "Edit Person";
+                try {
+                    const p = await (await fetch(`/api/person_details/${clusterId}`)).json();
+                    document.getElementById('editId').value = p.id;
+                    nameInput.value = p.name;
+                    genderInput.value = p.gender;
+                    avatar.src = p.avatar_url;
+                } catch(e) { console.error(e); }
+            }
+
+            // 4. Load Merge/Assign Options
+            // If Unknown: Dropdown says "Assign to existing..."
+            // If Known: Dropdown says "Merge into..."
+            const allPeople = await (await fetch('/api/people')).json();
+            let opts = '<option value="">-- Create New (or No Change) --</option>';
+            
+            allPeople.forEach(p => {
+                if (p.id !== clusterId) {
+                    opts += `<option value="${p.id}">Assign to: ${p.name}</option>`;
+                }
+            });
+            mergeSel.innerHTML = opts;
+        }
+
         function closeModal() { document.getElementById('editModal').style.display='none'; }
-        async function savePerson() { const id=document.getElementById('editId').value, tid=document.getElementById('mergeTarget').value; if(tid){ if(confirm('Merge?')) await fetch('/api/merge_people', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({source_id:id, target_id:tid})}); } else { await fetch('/api/update_person', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id, name:document.getElementById('editName').value, gender:document.getElementById('editGender').value})}); } closeModal(); loadPeople(); }
+        //async function savePerson() { const id=document.getElementById('editId').value, tid=document.getElementById('mergeTarget').value; if(tid){ if(confirm('Merge?')) await fetch('/api/merge_people', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({source_id:id, target_id:tid})}); } else { await fetch('/api/update_person', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id, name:document.getElementById('editName').value, gender:document.getElementById('editGender').value})}); } closeModal(); loadPeople(); }
+        async function savePerson() {
+            // 1. Get the ID loaded into the modal
+            // If it's a new face, we set this to "-1" in openEdit()
+            // If it's a deleted person, this is "a1b2..."
+            const id = document.getElementById('editId').value; 
+            
+            const name = document.getElementById('editName').value;
+            const gender = document.getElementById('editGender').value;
+            const targetId = document.getElementById('mergeTarget').value; // If user selected someone to merge into
+            
+            // Hidden fields we added earlier
+            const md5 = document.getElementById('editMd5').value;
+            const faceId = document.getElementById('editFaceId').value;
+
+            const headers = {'Content-Type':'application/json'};
+
+            // --- SCENARIO A: Merging/Assigning to Existing ---
+            if (targetId) {
+                if (id === "-1") {
+                    // It was unknown, now belongs to targetId
+                    await fetch('/api/assign_face', {
+                        method: 'POST', headers,
+                        body: JSON.stringify({ md5, face_id: faceId, target_id: targetId })
+                    });
+                } else {
+                    // It was someone else, now merging two people
+                    if(confirm("Merge these people?")) {
+                        await fetch('/api/merge_people', {
+                            method: 'POST', headers,
+                            body: JSON.stringify({ source_id: id, target_id: targetId })
+                        });
+                    }
+                }
+            } 
+            // --- SCENARIO B: Creating NEW Person ---
+            else if (id === "-1") {
+                if (!name) return alert("Please enter a name for this new person");
+                
+                // THIS IS WHY YOU NEED create_person
+                // We need to generate a UUID and write to people.json
+                await fetch('/api/create_person', {
+                    method: 'POST', headers,
+                    body: JSON.stringify({ md5, face_id: faceId, name, gender })
+                });
+            } 
+            // --- SCENARIO C: Updating/Restoring "Deleted" Person ---
+            else {
+                // This handles standard renaming AND "Undeleting"
+                // The backend update_person should force is_deleted = False
+                await fetch('/api/update_person', {
+                    method: 'POST', headers,
+                    body: JSON.stringify({ id, name, gender })
+                });
+            }
+
+            closeModal();
+            openViewer(md5); // Refresh view
+        }
         async function deletePerson() { const id=document.getElementById('editId').value; if(!confirm("Delete?")) return; await fetch('/api/delete_person', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:document.getElementById('editId').value})}); closeModal(); loadPeople(); }
         async function removeFace(md5, fid, e) { e.stopPropagation(); if(confirm('Remove?')) if((await (await fetch('/api/remove_face_from_cluster', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({md5, face_id:fid})})).json()).success) document.getElementById('face-'+fid).remove(); }
 

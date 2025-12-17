@@ -683,9 +683,18 @@ def details(md5):
     faces = []
     for f in p["faces"]:
         cid = f["cluster_id"]
+        # LOOKUP NAME
+        name = "Unknown"
+        if cid in global_state["people"]:
+            name = global_state["people"][cid]["name"]
+            if global_state["people"][cid].get("is_deleted"):
+                name += " (Deleted)"
+
         faces.append({
-            "name": global_state["people"][cid]["name"] if cid in global_state["people"] else "Unknown",
-            "face_id": f["id"], "md5": md5
+            "name": name,
+            "face_id": f["id"], 
+            "md5": md5,
+            "cluster_id": cid  # <--- ADDED THIS
         })
 
     return jsonify({
@@ -722,16 +731,6 @@ def delete_bulk():
         if i in global_state["people"]: global_state["people"][i]["is_deleted"] = True
     save_people_db()
     return jsonify({"success": True})
-
-@app.route('/api/update_person', methods=['POST'])
-def update_person():
-    d = request.json
-    cid = d.get('id')
-    if cid in global_state["people"]:
-        global_state["people"][cid].update({"name": d.get('name'), "gender": d.get('gender')})
-        save_people_db()
-        return jsonify({"success": True})
-    return jsonify({"success": False})
 
 @app.route('/api/merge_people', methods=['POST'])
 def merge_people():
@@ -799,34 +798,89 @@ def search():
     results.sort(key=lambda x: x['created'], reverse=True)
     return jsonify(results)
 
-# --- UPDATE INGEST TO STORE GPS (Important for Map) ---
-# Update the ingest_data method inside ScannerThread class:
-# We need to monkey-patch or you should paste this inside the ScannerThread class in your file
-# For brevity, ensure the `ingest_data` method looks like this:
 
-# ... (Inside ScannerThread) ...
-#    def ingest_data(self, full_path, md5, faces, c_time, m_time, is_video):
-#        # ... existing ...
-#        # Extract GPS if not already in memory/cache to enable Map View
-#        gps_coords = None
-#        if not is_video:
-#             # Simple optimization: only extract if not already cached
-#             # For a robust app, we'd store this in profile.json. 
-#             # Here we do it on scan if missing.
-#             try:
-#                 img = Image.open(full_path)
-#                 gps_str = extract_gps(img)
-#                 if gps_str:
-#                     lat, lon = gps_str.split(',')
-#                     gps_coords = (float(lat), float(lon))
-#             except: pass
-#
-#        if md5 not in global_state["photos"]:
-#            global_state["photos"][md5] = {
-#                # ... existing ...
-#                "gps_coords": gps_coords 
-#            }
-# ...
+@app.route('/api/person_details/<pid>')
+def get_person_details(pid):
+    if pid in global_state["people"]:
+        p = global_state["people"][pid]
+        return jsonify({
+            "id": pid,
+            "name": p["name"],
+            "gender": p["gender"],
+            "is_deleted": p.get("is_deleted", False),
+            "avatar_url": f"/api/face_crop/{p['avatar_md5']}/{p['avatar_face_id']}"
+        })
+    return jsonify({"error": "Not found"}), 404
+
+@app.route('/api/update_person', methods=['POST'])
+def update_person():
+    d = request.json
+    cid = d.get('id')
+    if cid in global_state["people"]:
+        global_state["people"][cid].update({
+            "name": d.get('name'), 
+            "gender": d.get('gender'),
+            "is_deleted": False  # <--- FORCE RESTORE ON EDIT
+        })
+        save_people_db()
+        return jsonify({"success": True})
+    return jsonify({"success": False})
+
+# Add uuid import if missing
+import uuid
+
+@app.route('/api/create_person', methods=['POST'])
+def create_person():
+    d = request.json
+    md5 = d.get('md5')
+    face_id = d.get('face_id')
+    name = d.get('name')
+    gender = d.get('gender')
+
+    # 1. Create new Person ID
+    new_pid = uuid.uuid4().hex
+    
+    global_state["people"][new_pid] = {
+        "name": name,
+        "gender": gender,
+        "avatar_md5": md5,
+        "avatar_face_id": face_id,
+        "is_deleted": False
+    }
+    save_people_db()
+
+    # 2. Update the specific face in memory
+    if md5 in global_state["photos"]:
+        for f in global_state["photos"][md5]["faces"]:
+            if f["id"] == face_id:
+                f["cluster_id"] = new_pid
+                f["manual"] = True # Lock it so AI doesn't change it back
+                break
+        # 3. Save to profile.json
+        save_profile_for_md5(md5)
+
+    return jsonify({"success": True, "new_id": new_pid})
+
+@app.route('/api/assign_face', methods=['POST'])
+def assign_face():
+    d = request.json
+    md5 = d.get('md5')
+    face_id = d.get('face_id')
+    target_id = d.get('target_id') # The existing person UUID
+
+    if target_id not in global_state["people"]:
+        return jsonify({"success": False, "error": "Person not found"})
+
+    if md5 in global_state["photos"]:
+        for f in global_state["photos"][md5]["faces"]:
+            if f["id"] == face_id:
+                f["cluster_id"] = target_id
+                f["manual"] = True
+                f["is_deleted"] = False # Restore if it was deleted
+                break
+        save_profile_for_md5(md5)
+
+    return jsonify({"success": True})
 
 if __name__ == '__main__':
     multiprocessing.freeze_support()
