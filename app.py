@@ -11,6 +11,8 @@ import cv2
 import numpy as np
 from flask import Flask, render_template, jsonify, request, send_file
 from sklearn.cluster import DBSCAN
+from sklearn.metrics.pairwise import cosine_distances
+
 from PIL import Image, ExifTags, ImageOps
 import io
 import uuid
@@ -31,7 +33,8 @@ args = parser.parse_args()
 
 ROOT_PHOTO_DIR = args.root_photo_dir
 PEOPLE_DB_FILE = "people.json"
-ALLOWED_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.webp'}
+# Added Video Extensions
+ALLOWED_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.webp', '.mp4', '.mov'}
 MAX_WORKERS = max(1, int(os.cpu_count() * 0.6)) 
 DET_THRESHOLD = 0.60
 MIN_FACE_SIZE = 40
@@ -74,73 +77,57 @@ def get_file_dates(path):
         return c, m
     except: return "-","-"
 
-# def extract_gps(img):
-#     try:
-#         exif = img.getexif()
-#         if not exif: return None
-#         gps_info = exif.get_ifd(0x8825)
-#         if not gps_info: return None
-#         def to_deg(dms, ref):
-#             d = dms[0] + (dms[1]/60.0) + (dms[2]/3600.0)
-#             return -d if ref in ['S','W'] else d
-#         if 2 in gps_info and 4 in gps_info:
-#             lat = to_deg(gps_info[2], gps_info.get(1,'N'))
-#             lon = to_deg(gps_info[4], gps_info.get(3,'E'))
-#             return f"{lat},{lon}"
-#     except: pass
-#     return None
-
-
-
 def extract_gps(img):
-    """
-    Extracts GPS location from PIL image and converts to decimal format.
-    Returns string "lat,lon" or None.
-    """
     try:
         exif = img.getexif()
         if not exif: return None
-        
-        # GPS Information is stored in a specific IFD (ID: 34853 / 0x8825)
         gps_info = exif.get_ifd(0x8825)
         if not gps_info: return None
-
-        # Helper to convert DMS tuple to decimal
         def to_decimal(dms, ref):
-            degrees = dms[0]
-            minutes = dms[1]
-            seconds = dms[2]
-            decimal = degrees + (minutes / 60.0) + (seconds / 3600.0)
-            if ref in ['S', 'W']:
-                decimal = -decimal
-            return decimal
-
-        # Tags: 1=LatRef, 2=Lat, 3=LonRef, 4=Lon
+            d = dms[0] + (dms[1]/60.0) + (dms[2]/3600.0)
+            return -d if ref in ['S', 'W'] else d
         if 2 in gps_info and 4 in gps_info:
             lat = to_decimal(gps_info[2], gps_info.get(1, 'N'))
             lon = to_decimal(gps_info[4], gps_info.get(3, 'E'))
             return f"{lat},{lon}"
-            
-    except Exception as e:
-        print(f"GPS Error: {e}")
+    except: pass
     return None
+
 # --- WORKER ---
 
 def process_single_image(file_data):
     full_path, root_dir = file_data
     filename = os.path.basename(full_path)
+    ext = os.path.splitext(filename)[1].lower()
+    
     try:
         md5_val = calculate_md5(full_path)
         if not md5_val: return None
         c_time, m_time = get_file_dates(full_path)
         
-        # EXIF Rotation
-        try:
-            pil_img = Image.open(full_path)
-            pil_img = ImageOps.exif_transpose(pil_img)
-            img = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
-        except:
-            img = cv2.imread(full_path)
+        img = None
+        is_video = False
+
+        if ext in ['.mp4', '.mov']:
+            is_video = True
+            # Extract frame from middle of video using OpenCV
+            cap = cv2.VideoCapture(full_path)
+            if cap.isOpened():
+                # Jump to 20% to avoid black frames at start
+                length = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                cap.set(cv2.CAP_PROP_POS_FRAMES, int(length * 0.2))
+                ret, frame = cap.read()
+                if ret:
+                    img = frame # BGR format
+            cap.release()
+        else:
+            # Image Processing
+            try:
+                pil_img = Image.open(full_path)
+                pil_img = ImageOps.exif_transpose(pil_img)
+                img = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
+            except:
+                img = cv2.imread(full_path)
 
         if img is None: return None
 
@@ -155,8 +142,6 @@ def process_single_image(file_data):
             bbox = face.bbox.astype(int).tolist()
             # [top, right, bottom, left]
             converted_box = [bbox[1], bbox[2], bbox[3], bbox[0]]
-            
-            # STABLE FACE ID: based on coordinates
             face_id = f"{bbox[1]}_{bbox[2]}_{bbox[3]}_{bbox[0]}"
 
             faces_data.append({
@@ -170,56 +155,45 @@ def process_single_image(file_data):
         return {
             "status": "success", "full_path": full_path, "root_dir": root_dir, 
             "filename": filename, "md5": md5_val, "created": c_time, "modified": m_time, 
-            "faces": faces_data
+            "faces": faces_data, "is_video": is_video
         }
     except Exception as e:
         return {"status": "error", "file": filename, "msg": str(e)}
 
-# --- SCANNER ---
+# --- SCANNER (Logic Unchanged, just passes is_video) ---
 
 class ScannerThread(threading.Thread):
     def run(self):
         global_state["status"].update({"is_scanning": True, "progress": 0, "current_task": "Discovery"})
-        
         files_to_process = []
         updates_by_dir = {} 
         all_files_count = 0
         
-        # 1. DISCOVERY
         for root, dirs, files in os.walk(ROOT_PHOTO_DIR):
             profile_path = os.path.join(root, "profile.json")
             local_cache = {}
             if os.path.exists(profile_path):
                 try: 
-                    with open(profile_path, 'r') as f: local_cache = json.load(f)
+                    with open(profile_path, 'r') as f: 
+                        local_cache = json.load(f)
                 except: pass
-            
             updates_by_dir[root] = local_cache
             
             for file in files:
                 if os.path.splitext(file)[1].lower() in ALLOWED_EXTENSIONS:
                     all_files_count += 1
                     full_path = os.path.join(root, file)
-                    
                     should_process = True
-                    
                     if file in local_cache:
                         c = local_cache[file]
-                        # CRITICAL FIX: Check if data is legacy (missing 'id')
-                        # If legacy, we force re-process to generate IDs and fix coordinates
-                        if c.get("faces") and "id" not in c["faces"][0]:
-                            should_process = True
+                        if c.get("faces") and "id" not in c["faces"][0]: should_process = True
                         else:
                             should_process = False
-                            # Hydrate
-                            self.ingest_data(full_path, c["md5"], c["faces"], c.get("created"), c.get("modified"))
-
-                    if should_process:
-                        files_to_process.append((full_path, root))
+                            self.ingest_data(full_path, c["md5"], c["faces"], c.get("created"), c.get("modified"), c.get("is_video", False))
+                    if should_process: files_to_process.append((full_path, root))
 
         global_state["status"]["total_files"] = all_files_count
         
-        # 2. PROCESSING
         if files_to_process:
             with ProcessPoolExecutor(max_workers=MAX_WORKERS, initializer=init_worker) as executor:
                 futures = [executor.submit(process_single_image, i) for i in files_to_process]
@@ -229,148 +203,212 @@ class ScannerThread(threading.Thread):
                     done += 1
                     global_state["status"]["progress"] = int((done / len(files_to_process))*80)
                     global_state["status"]["current_task"] = f"Processed {done}/{len(files_to_process)}"
-                    
                     if res and res["status"] == "success":
-                        self.ingest_data(res["full_path"], res["md5"], res["faces"], res["created"], res["modified"])
+                        self.ingest_data(res["full_path"], res["md5"], res["faces"], res["created"], res["modified"], res.get("is_video", False))
                         updates_by_dir[res["root_dir"]][res["filename"]] = {
-                            "md5": res["md5"], "created": res["created"], "modified": res["modified"], "faces": res["faces"]
+                            "md5": res["md5"], "created": res["created"], "modified": res["modified"], 
+                            "faces": res["faces"], "is_video": res.get("is_video", False)
                         }
 
-        # Save all profiles
         for root, data in updates_by_dir.items():
             if data:
                 with open(os.path.join(root, "profile.json"), 'w') as f: json.dump(data, f, indent=4)
 
-        # 3. CLUSTERING
         self.perform_clustering(updates_by_dir)
-        
         global_state["status"].update({"is_scanning": False, "progress": 100, "current_task": "Done"})
 
-    def ingest_data(self, full_path, md5, faces, c_time, m_time):
+    def ingest_data(self, full_path, md5, faces, c_time, m_time, is_video):
         global_state["path_map"][full_path] = md5
         folder = os.path.basename(os.path.dirname(full_path))
         parts = folder.split('_')
         location = "_".join(parts[1:]) if len(parts) > 1 else folder
 
-        # Safety: Backfill IDs if missing (should be handled by re-scan logic, but double safety)
         for f in faces:
             if "id" not in f and "box" in f:
                  b = f["box"]
                  f["id"] = f"{b[0]}_{b[1]}_{b[2]}_{b[3]}"
 
+        gps_coords = None
+        # Try to read GPS if we don't have it (simplified for this demo)
+        # In production, save this to profile.json to avoid re-reading images
+        if not is_video:
+            try:
+                img = Image.open(full_path)
+                gps_str = extract_gps(img)
+                if gps_str:
+                    lat, lon = gps_str.split(',')
+                    gps_coords = (float(lat), float(lon))
+            except: pass
+
         if md5 not in global_state["photos"]:
             global_state["photos"][md5] = {
                 "paths": [], "faces": faces, "location": location,
                 "folder": folder, "created": c_time, "modified": m_time, 
-                "filename": os.path.basename(full_path)
+                "filename": os.path.basename(full_path),
+                "is_video": is_video,
+                "gps_coords": gps_coords
             }
-        
         if full_path not in global_state["photos"][md5]["paths"]:
             global_state["photos"][md5]["paths"].append(full_path)
 
     def perform_clustering(self, updates_by_dir):
-        global_state["status"]["current_task"] = "Clustering..."
+        global_state["status"]["current_task"] = "Organizing..."
         
-        # 1. Prepare Data
-        # We need to map the flat list of encodings back to specific faces
-        all_encodings = []
-        map_back = [] # List of (md5, face_index)
+        # --- PHASE 1: BUILD ANCHORS (The "Memory") ---
+        # We calculate the average face (centroid) for every person currently in the DB.
+        # This includes DELETED people, so we can recognize and ignore them later.
+        
+        person_vectors = {} # { "person_uuid": [vector1, vector2...] }
+        
+        # 1a. Gather vectors from currently assigned faces
+        for md5, pdata in global_state["photos"].items():
+            for face in pdata["faces"]:
+                cid = face["cluster_id"]
+                # Only use valid encodings assigned to a known person ID
+                if cid != "-1" and cid in global_state["people"]:
+                    if len(face["encoding"]) == 512:
+                        if cid not in person_vectors: person_vectors[cid] = []
+                        person_vectors[cid].append(face["encoding"])
+
+        # 1b. Calculate Centroids (The "Average Face")
+        anchors = {} # { "person_uuid": numpy_array_centroid }
+        for cid, vectors in person_vectors.items():
+            if len(vectors) > 0:
+                anchors[cid] = np.mean(vectors, axis=0)
+
+        # --- PHASE 2: SEPARATE UNKNOWNS ---
+        unknown_faces = [] # List of { "md5":..., "idx":..., "encoding":... }
         
         for md5, pdata in global_state["photos"].items():
             for i, face in enumerate(pdata["faces"]):
-                # CRITICAL: We DO NOT cluster faces that are:
-                # 1. Manual (User confirmed)
-                # 2. Deleted (Soft deleted faces should stay deleted)
-                if not face.get("manual", False) and not face.get("is_deleted", False):
-                    # Validate encoding
-                    enc = face["encoding"]
-                    if len(enc) == 512 and not np.isnan(np.sum(enc)):
-                        all_encodings.append(enc)
-                        map_back.append((md5, i))
-        
-        if not all_encodings: return
+                # We process faces that are Unknown (-1) AND not manually "un-tagged"
+                # If user manually set it to -1 (manual=True), we respect that and skip it.
+                if face["cluster_id"] == "-1" and not face.get("manual", False) and not face.get("is_deleted", False):
+                    if len(face["encoding"]) == 512:
+                        unknown_faces.append({
+                            "md5": md5,
+                            "idx": i,
+                            "encoding": face["encoding"]
+                        })
 
-        print(f"Clustering {len(all_encodings)} faces...")
-        
-        # 2. Run DBSCAN
-        clt = DBSCAN(metric="cosine", n_jobs=-1, eps=0.40, min_samples=1)
-        clt.fit(all_encodings)
-        
-        # 3. Group Results by Temporary Label
-        # temp_clusters = { "0": [(md5, idx), ...], "1": [...] }
-        temp_clusters = {}
-        for i, label_id in enumerate(clt.labels_):
-            if label_id == -1: continue # Noise
-            str_label = str(label_id)
-            if str_label not in temp_clusters: temp_clusters[str_label] = []
-            temp_clusters[str_label].append(map_back[i])
+        if not unknown_faces: return
 
+        print(f"Processing {len(unknown_faces)} new faces against {len(anchors)} existing people...")
+        
+        # Prepare data for bulk updates
         dirty_dirs = set()
+        faces_to_cluster = [] # Faces that didn't match anyone (for DBSCAN)
 
-        # 4. Assign Persistent UUIDs
-        for label, face_locations in temp_clusters.items():
+        # --- PHASE 3: RECOGNITION (Match against Anchors) ---
+        if anchors:
+            anchor_ids = list(anchors.keys())
+            anchor_matrix = np.array(list(anchors.values()))
+            unknown_matrix = np.array([f["encoding"] for f in unknown_faces])
             
-            # Step A: Check if this group belongs to an existing Person
-            # We look at all faces in this new group. If they previously had a valid cluster_id (UUID),
-            # we vote. (e.g., if 80% of faces were 'Person-A', this group is 'Person-A')
+            # Calculate distance matrix (Unknowns vs Anchors)
+            # Result is [num_unknowns x num_anchors]
+            dists = cosine_distances(unknown_matrix, anchor_matrix)
             
-            existing_ids = []
-            for (md5, f_idx) in face_locations:
-                current_cid = global_state["photos"][md5]["faces"][f_idx]["cluster_id"]
-                if current_cid != "-1" and current_cid in global_state["people"]:
-                    existing_ids.append(current_cid)
+            # Threshold for "Same Person" (0.4 is standard for ArcFace)
+            MATCH_THRESHOLD = 0.40 
             
-            final_person_id = None
-            
-            if existing_ids:
-                # Find most common existing ID (Stability check)
-                from collections import Counter
-                most_common = Counter(existing_ids).most_common(1)
-                if most_common:
-                    final_person_id = most_common[0][0]
-            
-            # Step B: If no existing ID found, create NEW UUID
-            if not final_person_id:
-                final_person_id = uuid.uuid4().hex # Unique 32-char string
+            for i, face_data in enumerate(unknown_faces):
+                # Find closest anchor
+                min_dist_idx = np.argmin(dists[i])
+                min_dist = dists[i][min_dist_idx]
                 
-                # Create Profile
-                # Use the first face as avatar
-                first_md5, first_idx = face_locations[0]
-                first_face = global_state["photos"][first_md5]["faces"][first_idx]
-                
-                global_state["people"][final_person_id] = {
-                    "name": f"Person {label}", # Display name can use label temporarily
-                    "gender": "Unknown",
-                    "avatar_md5": first_md5, 
-                    "avatar_face_id": first_face.get("id"),
-                    "is_deleted": False # Init flag
-                }
-                save_people_db()
-
-            # Step C: Apply this UUID to all faces in the cluster
-            for (md5, f_idx) in face_locations:
-                face = global_state["photos"][md5]["faces"][f_idx]
-                
-                # Only update if changed
-                if face["cluster_id"] != final_person_id:
-                    face["cluster_id"] = final_person_id
+                if min_dist < MATCH_THRESHOLD:
+                    # MATCH FOUND!
+                    matched_pid = anchor_ids[min_dist_idx]
+                    matched_person = global_state["people"][matched_pid]
                     
-                    # Mark for disk save
-                    if global_state["photos"][md5]["paths"]:
-                        main_path = global_state["photos"][md5]["paths"][0]
-                        d = os.path.dirname(main_path)
-                        f = os.path.basename(main_path)
-                        
-                        if d in updates_by_dir and f in updates_by_dir[d]:
-                            # Ensure index validity
-                            if f_idx < len(updates_by_dir[d][f]["faces"]):
-                                updates_by_dir[d][f]["faces"][f_idx]["cluster_id"] = final_person_id
-                                dirty_dirs.add(d)
+                    md5 = face_data["md5"]
+                    f_idx = face_data["idx"]
+                    
+                    # Check if this person was deleted
+                    if matched_person.get("is_deleted", False):
+                        # Auto-delete this face
+                        global_state["photos"][md5]["faces"][f_idx]["is_deleted"] = True
+                        global_state["photos"][md5]["faces"][f_idx]["manual"] = True # Lock it
+                        global_state["photos"][md5]["faces"][f_idx]["cluster_id"] = "-1"
+                    else:
+                        # Assign to existing person
+                        global_state["photos"][md5]["faces"][f_idx]["cluster_id"] = matched_pid
+                    
+                    # Update Disk Buffer
+                    self._mark_dirty(md5, f_idx, updates_by_dir, dirty_dirs)
+                else:
+                    # No match found, send to clustering pool
+                    faces_to_cluster.append(face_data)
+        else:
+            # No existing people, everyone goes to clustering
+            faces_to_cluster = unknown_faces
 
-        # 5. Save Disk Updates
+        # --- PHASE 4: DISCOVERY (DBSCAN on leftovers) ---
+        if len(faces_to_cluster) > 0:
+            print(f"Clustering {len(faces_to_cluster)} remaining unknown faces...")
+            cluster_matrix = [f["encoding"] for f in faces_to_cluster]
+            
+            # Run DBSCAN
+            clt = DBSCAN(metric="cosine", n_jobs=-1, eps=0.40, min_samples=2)
+            clt.fit(cluster_matrix)
+            
+            # Assign new UUIDs to new clusters
+            new_cluster_map = {} # { dbscan_label: new_uuid }
+            
+            for i, label_id in enumerate(clt.labels_):
+                if label_id == -1: continue # Noise, stays unknown
+                
+                face_data = faces_to_cluster[i]
+                md5 = face_data["md5"]
+                f_idx = face_data["idx"]
+                
+                # Create new Person ID if we haven't seen this label yet
+                if label_id not in new_cluster_map:
+                    new_uid = uuid.uuid4().hex
+                    new_cluster_map[label_id] = new_uid
+                    
+                    # Create Entry in People DB
+                    first_face = global_state["photos"][md5]["faces"][f_idx]
+                    global_state["people"][new_uid] = {
+                        "name": f"New Person {str(new_uid)[:6]}", 
+                        "gender": "Unknown",
+                        "avatar_md5": md5, 
+                        "avatar_face_id": first_face.get("id"),
+                        "is_deleted": False
+                    }
+                    save_people_db()
+                
+                # Assign
+                final_pid = new_cluster_map[label_id]
+                global_state["photos"][md5]["faces"][f_idx]["cluster_id"] = final_pid
+                
+                # Update Disk Buffer
+                self._mark_dirty(md5, f_idx, updates_by_dir, dirty_dirs)
+
+        # --- PHASE 5: SAVE TO DISK ---
         for d in dirty_dirs:
             p_path = os.path.join(d, "profile.json")
-            with open(p_path, 'w') as f: json.dump(updates_by_dir[d], f, indent=4)
+            if d in updates_by_dir:
+                with open(p_path, 'w') as f: json.dump(updates_by_dir[d], f, indent=4)
+
+    def _mark_dirty(self, md5, f_idx, updates_by_dir, dirty_dirs):
+        """Helper to update the disk write buffer"""
+        if global_state["photos"][md5]["paths"]:
+            main_path = global_state["photos"][md5]["paths"][0]
+            d = os.path.dirname(main_path)
+            f = os.path.basename(main_path)
+            
+            if d in updates_by_dir and f in updates_by_dir[d]:
+                # Sync memory state to disk buffer
+                mem_face = global_state["photos"][md5]["faces"][f_idx]
+                disk_face_list = updates_by_dir[d][f]["faces"]
+                
+                if f_idx < len(disk_face_list):
+                    disk_face_list[f_idx]["cluster_id"] = mem_face["cluster_id"]
+                    disk_face_list[f_idx]["manual"] = mem_face.get("manual", False)
+                    disk_face_list[f_idx]["is_deleted"] = mem_face.get("is_deleted", False)
+                    dirty_dirs.add(d)
 # --- ROUTES ---
 
 @app.route('/')
@@ -391,7 +429,16 @@ def get_dirs():
     res = {}
     for md5, p in global_state["photos"].items():
         f = p["folder"]
-        if f not in res: res[f] = {"name": f, "location": p["location"], "count": 0}
+        if f not in res: 
+            # Use this photo as the cover for the folder
+            # Prefer video thumb if it's a video, else image
+            cover_url = f"/video_thumb/{md5}" if p.get("is_video") else f"/image_by_md5/{md5}"
+            res[f] = {
+                "name": f, 
+                "location": p["location"], 
+                "count": 0, 
+                "cover": cover_url
+            }
         res[f]["count"] += 1
     return jsonify(sorted(list(res.values()), key=lambda x:x['name'], reverse=True))
 
@@ -406,12 +453,9 @@ def photos_by_dir():
                 cid = face["cluster_id"]
                 name = global_state["people"][cid]["name"] if cid in global_state["people"] else "Unknown"
                 faces_simple.append({"name": name, "face_id": face["id"], "md5": md5})
-            
             res.append({
-                "md5": md5,
-                "url": f"/image_by_md5/{md5}",
-                "filename": p["filename"],
-                "faces": faces_simple
+                "md5": md5, "url": f"/video_thumb/{md5}" if p.get("is_video") else f"/image_by_md5/{md5}",
+                "filename": p["filename"], "faces": faces_simple, "is_video": p.get("is_video", False)
             })
     return jsonify(res)
 
@@ -421,26 +465,18 @@ def get_people():
     counts = {}
     for md5, p in global_state["photos"].items():
         for f in p["faces"]:
-            # Don't count deleted faces
             if not f.get("is_deleted", False):
                 counts[f["cluster_id"]] = counts.get(f["cluster_id"], 0) + 1
-            
     for cid, p in global_state["people"].items():
-        if cid == "-1": continue
-        # FILTER: Don't show deleted people
-        if p.get("is_deleted", False): continue
-        
-        # FILTER: Don't show people with 0 photos (cleaned up automatically)
+        if cid == "-1" or p.get("is_deleted", False): continue
         if counts.get(cid, 0) == 0: continue
-
         res.append({
-            "id": cid, 
-            "name": p["name"], 
-            "gender": p["gender"],
+            "id": cid, "name": p["name"], "gender": p["gender"],
             "count": counts.get(cid, 0),
             "avatar_url": f"/api/face_crop/{p['avatar_md5']}/{p['avatar_face_id']}"
-        })
+})
     return jsonify(sorted(res, key=lambda x:x['count'], reverse=True))
+
 @app.route('/api/faces_by_person/<pid>')
 def faces_by_person(pid):
     res = []
@@ -454,7 +490,43 @@ def faces_by_person(pid):
                 })
     return jsonify(res)
 
-# --- IMAGE SERVING ---
+@app.route('/api/set_avatar', methods=['POST'])
+def set_avatar():
+    d = request.json
+    person_id = d.get('person_id')
+    md5 = d.get('md5')
+    face_id = d.get('face_id')
+    
+    if person_id in global_state["people"]:
+        global_state["people"][person_id]["avatar_md5"] = md5
+        global_state["people"][person_id]["avatar_face_id"] = face_id
+        save_people_db()
+        return jsonify({"success": True})
+    return jsonify({"success": False})
+
+@app.route('/api/map_all')
+def map_all():
+    points = []
+    for md5, p in global_state["photos"].items():
+        if not p["paths"]: continue
+        
+        # Ensure we have GPS
+        if p.get("gps_coords"):
+            lat, lon = p["gps_coords"]
+            thumb = f"/video_thumb/{md5}" if p.get("is_video") else f"/image_by_md5/{md5}"
+            points.append({
+                "lat": lat, 
+                "lon": lon, 
+                "md5": md5, 
+                "thumb": thumb,
+                "created": p.get("created", "0") # <--- Added for sorting
+            })
+            
+    # Optional: Sort by date descending globally (helpful, but clustering logic does local sort)
+    points.sort(key=lambda x: x['created'], reverse=True)
+    return jsonify(points)
+
+# --- IMAGE/VIDEO SERVING ---
 
 @app.route('/image_by_md5/<md5>')
 def serve_img(md5):
@@ -462,10 +534,44 @@ def serve_img(md5):
         return send_file(global_state["photos"][md5]["paths"][0])
     return "Missing", 404
 
+@app.route('/video_thumb/<md5>')
+def serve_video_thumb(md5):
+    """
+    Dynamically extracts a frame from the video and serves it as JPEG.
+    No disk save.
+    """
+    if md5 not in global_state["photos"]: return "Err", 404
+    path = global_state["photos"][md5]["paths"][0]
+    
+    try:
+        cap = cv2.VideoCapture(path)
+        # Seek to 10% to capture a representative frame
+        total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        cap.set(cv2.CAP_PROP_POS_FRAMES, int(total * 0.1))
+        ret, frame = cap.read()
+        cap.release()
+        
+        if ret:
+            # Convert BGR (OpenCV) to RGB (Pillow)
+            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            img = Image.fromarray(frame)
+            
+            # Create in-memory stream
+            bio = io.BytesIO()
+            img.save(bio, 'JPEG', quality=70)
+            bio.seek(0)
+            return send_file(bio, mimetype='image/jpeg')
+    except: pass
+    
+    # Fallback/Error placeholder
+    return send_file('static/img/folder.svg') 
+
+
 @app.route('/api/face_crop/<md5>/<face_id>')
 def serve_crop(md5, face_id):
     if md5 not in global_state["photos"]: return "Err", 404
     
+    # 1. Locate Face
     target_face = None
     for f in global_state["photos"][md5]["faces"]:
         if f["id"] == face_id:
@@ -475,23 +581,86 @@ def serve_crop(md5, face_id):
     if not target_face: return "Face Not Found", 404
     
     path = global_state["photos"][md5]["paths"][0]
+    p_data = global_state["photos"][md5]
+    img = None
+    
     try:
-        img = Image.open(path)
-        img = ImageOps.exif_transpose(img) 
+        # 2. Load Image/Video
+        if p_data.get("is_video"):
+            cap = cv2.VideoCapture(path)
+            total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            cap.set(cv2.CAP_PROP_POS_FRAMES, int(total * 0.2))
+            ret, frame = cap.read()
+            cap.release()
+            if ret:
+                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                img = Image.fromarray(frame)
+        else:
+            img = Image.open(path)
+            img = ImageOps.exif_transpose(img)
         
-        top, right, bottom, left = target_face["box"]
-        pad = 50
-        w, h = img.size
-        crop = img.crop((max(0, left-pad), max(0, top-pad), min(w, right+pad), min(h, bottom+pad))).convert("RGB")
+        if img:
+            # 3. Calculate Perfect Square Crop
+            # stored box is [top, right, bottom, left]
+            top, right, bottom, left = target_face["box"]
+            
+            face_w = right - left
+            face_h = bottom - top
+            center_x = left + (face_w / 2)
+            center_y = top + (face_h / 2)
+            
+            # Make a square box: 1.5x the largest dimension of the face
+            box_size = max(face_w, face_h) * 1.5
+            half_box = box_size / 2
+            
+            # Calculate coordinates (might be negative or larger than image)
+            x1 = int(center_x - half_box)
+            y1 = int(center_y - half_box)
+            x2 = int(center_x + half_box)
+            y2 = int(center_y + half_box)
+            
+            # 4. Safe Crop with Padding
+            # If coordinates are OOB, we pad the image instead of clipping the box
+            # This ensures the face stays in the center of the result
+            img_w, img_h = img.size
+            
+            # Check if padding is needed
+            pad_l = abs(min(0, x1))
+            pad_t = abs(min(0, y1))
+            pad_r = max(0, x2 - img_w)
+            pad_b = max(0, y2 - img_h)
+            
+            if pad_l > 0 or pad_t > 0 or pad_r > 0 or pad_b > 0:
+                # Add padding (black background)
+                new_w = img_w + pad_l + pad_r
+                new_h = img_h + pad_t + pad_b
+                new_img = Image.new("RGB", (new_w, new_h), (0, 0, 0))
+                new_img.paste(img, (pad_l, pad_t))
+                
+                # Adjust crop coordinates to new padded space
+                x1 += pad_l
+                y1 += pad_t
+                x2 += pad_l
+                y2 += pad_t
+                
+                crop = new_img.crop((x1, y1, x2, y2))
+            else:
+                # Standard crop
+                crop = img.crop((x1, y1, x2, y2))
+
+            # 5. Resize for thumbnail performance
+            crop.thumbnail((250, 250), Image.Resampling.LANCZOS)
+            
+            bio = io.BytesIO()
+            crop.save(bio, 'JPEG', quality=90)
+            bio.seek(0)
+            return send_file(bio, mimetype='image/jpeg')
+            
+    except Exception as e:
+        print(f"Crop Error: {e}")
+        pass # Fallback
         
-        bio = io.BytesIO()
-        crop.save(bio, 'JPEG')
-        bio.seek(0)
-        return send_file(bio, mimetype='image/jpeg')
-    except:
-        import traceback
-        traceback.print_exc()
-        return "Err", 500
+    return send_file('static/img/people.svg')
 
 @app.route('/api/photo_details/<md5>')
 def details(md5):
@@ -501,13 +670,14 @@ def details(md5):
     exif = {}
     gps = None
     try:
-        img = Image.open(p["paths"][0])
-        gps = extract_gps(img)
-        raw = img.getexif()
-        if raw:
-            for k,v in raw.items():
-                tag = ExifTags.TAGS.get(k, k)
-                if len(str(v)) < 100: exif[tag] = str(v)
+        if not p.get("is_video"):
+            img = Image.open(p["paths"][0])
+            gps = extract_gps(img)
+            raw = img.getexif()
+            if raw:
+                for k,v in raw.items():
+                    tag = ExifTags.TAGS.get(k, k)
+                    if len(str(v)) < 100: exif[tag] = str(v)
     except: pass
     
     faces = []
@@ -520,17 +690,16 @@ def details(md5):
 
     return jsonify({
         "filename": p["filename"], "folder": p["folder"], "location": p["location"],
-        "gps": gps, "created": p["created"], "exif": exif, "faces": faces, "full_path_id": md5 
+        "gps": gps, "created": p["created"], "exif": exif, "faces": faces, 
+        "full_path_id": md5, "is_video": p.get("is_video", False)
     })
 
-# --- DATA MANIPULATION ---
-
+# --- DATA MANIPULATION (Keep existing remove/delete/update/merge routes) ---
 @app.route('/api/remove_face_from_cluster', methods=['POST'])
 def remove_face():
     d = request.json
     md5 = d.get('md5')
     fid = d.get('face_id')
-    
     if md5 in global_state["photos"]:
         for f in global_state["photos"][md5]["faces"]:
             if f["id"] == fid:
@@ -543,58 +712,15 @@ def remove_face():
 @app.route('/api/delete_people_bulk', methods=['POST'])
 def delete_bulk():
     ids = set(request.json.get('ids', []))
-    updates_by_dir = {}
-    
-    # 1. Soft Delete the Person Profile
-    for i in ids: 
-        if i in global_state["people"]: 
-            global_state["people"][i]["is_deleted"] = True
-    save_people_db()
-
-    # 2. Mark faces as deleted (so they are ignored in future scans)
-    # We do NOT set cluster_id to "-1". We keep the link but flag it.
-    # This prevents the AI from picking them up as "New Person" next time.
-    
     for md5, p in global_state["photos"].items():
         changed = False
-        for i, f in enumerate(p["faces"]):
+        for f in p["faces"]:
             if f["cluster_id"] in ids:
-                f["is_deleted"] = True   # NEW FLAG
-                f["manual"] = True       # Lock it
-                f["cluster_id"] = "-1"   # Visually remove from group
-                
-                # Prepare disk update
-                if p["paths"]:
-                    d = os.path.dirname(p["paths"][0])
-                    fn = p["filename"]
-                    if d not in updates_by_dir: updates_by_dir[d] = {}
-                    if fn not in updates_by_dir[d]: updates_by_dir[d][fn] = {}
-                    # We need to know which face index to update. 
-                    # Ideally we load the file content here, but let's assume batched save below
-                    updates_by_dir[d][fn][i] = True # Mark index as needing update
-
+                f["is_deleted"] = True; f["manual"] = True; f["cluster_id"] = "-1"; changed = True
         if changed: save_profile_for_md5(md5)
-
-    # 3. Batch Save to Disk (Optimized)
-    # We need to iterate the updates_by_dir properly
-    for d, file_map in updates_by_dir.items():
-        p_path = os.path.join(d, "profile.json")
-        if os.path.exists(p_path):
-            try:
-                with open(p_path, 'r') as f: data = json.load(f)
-                write_needed = False
-                for fname, indices in file_map.items():
-                    if fname in data:
-                        for idx in indices:
-                            if idx < len(data[fname]['faces']):
-                                data[fname]['faces'][idx]["is_deleted"] = True
-                                data[fname]['faces'][idx]["manual"] = True
-                                data[fname]['faces'][idx]["cluster_id"] = "-1"
-                                write_needed = True
-                if write_needed:
-                    with open(p_path, 'w') as f: json.dump(data, f, indent=4)
-            except: pass
-
+    for i in ids: 
+        if i in global_state["people"]: global_state["people"][i]["is_deleted"] = True
+    save_people_db()
     return jsonify({"success": True})
 
 @app.route('/api/update_person', methods=['POST'])
@@ -610,25 +736,19 @@ def update_person():
 @app.route('/api/merge_people', methods=['POST'])
 def merge_people():
     d = request.json
-    sid = d.get('source_id')
-    tid = d.get('target_id')
-    
-    if sid not in global_state["people"] or tid not in global_state["people"]:
-        return jsonify({"success": False})
-
+    sid, tid = d.get('source_id'), d.get('target_id')
+    if sid not in global_state["people"] or tid not in global_state["people"]: return jsonify({"success": False})
     for md5, p in global_state["photos"].items():
         changed = False
         for f in p["faces"]:
             if f["cluster_id"] == sid:
-                f["cluster_id"] = tid
-                f["manual"] = True
-                changed = True
+                f["cluster_id"] = tid; f["manual"] = True; changed = True
         if changed: save_profile_for_md5(md5)
-
     if sid in global_state["people"]: del global_state["people"][sid]
     save_people_db()
     return jsonify({"success": True})
 
+# --- UTILS FOR SAVING ---
 def save_profile_for_md5(md5):
     if md5 in global_state["photos"]:
         path = global_state["photos"][md5]["paths"][0]
@@ -639,17 +759,10 @@ def save_profile_for_md5(md5):
             fname = os.path.basename(path)
             if fname in data:
                 mem_faces = global_state["photos"][md5]["faces"]
-                # Match by face ID
                 for mf in mem_faces:
                     for df in data[fname]["faces"]:
-                        # If legacy format on disk without ID, rely on box match
-                        if "id" in df:
-                            if df["id"] == mf["id"]:
-                                df["cluster_id"] = mf["cluster_id"]
-                                df["manual"] = mf["manual"]
-                        elif df["box"] == mf["box"]:
-                                df["cluster_id"] = mf["cluster_id"]
-                                df["manual"] = mf["manual"]
+                        if "id" in df and df["id"] == mf["id"]:
+                            df["cluster_id"] = mf["cluster_id"]; df["manual"] = mf["manual"]; df.get("is_deleted", False)
             with open(p_path, 'w') as f: json.dump(data, f, indent=4)
         except: pass
 
@@ -663,53 +776,57 @@ def save_people_db():
 @app.route('/api/search')
 def search():
     query = request.args.get('q', '').lower().strip()
-    if not query:
-        return jsonify([])
-    
+    if not query: return jsonify([])
     results = []
-    
-    # Pre-fetch people names for faster lookup
-    # { cluster_id: name_lowercase }
     people_map = {cid: p['name'].lower() for cid, p in global_state['people'].items() if not p.get('is_deleted')}
-
     for md5, p in global_state["photos"].items():
         match = False
-        
-        # 1. Check Metadata (Filename, Location, Date)
-        # Date format in memory is usually "YYYY-MM-DD HH:MM:SS"
-        if (query in p['filename'].lower() or 
-            query in p['location'].lower() or 
-            query in p['folder'].lower() or
-            query in p['created']): # Matches "2023", "2023-12", "12-25"
-            match = True
-            
-        # 2. Check People in Photo
+        if (query in p['filename'].lower() or query in p['location'].lower() or query in p['folder'].lower() or query in p['created']): match = True
         if not match:
             for face in p['faces']:
                 cid = face['cluster_id']
-                if cid in people_map and query in people_map[cid]:
-                    match = True
-                    break
-        
+                if cid in people_map and query in people_map[cid]: match = True; break
         if match:
-            # Format exactly like photos_by_dir
             faces_simple = []
             for face in p["faces"]:
                 cid = face["cluster_id"]
                 name = global_state["people"][cid]["name"] if cid in global_state["people"] else "Unknown"
                 faces_simple.append({"name": name, "face_id": face["id"], "md5": md5})
-            
             results.append({
-                "md5": md5,
-                "url": f"/image_by_md5/{md5}",
-                "filename": p["filename"],
-                "created": p["created"], # Added for sort
-                "faces": faces_simple
+                "md5": md5, "url": f"/video_thumb/{md5}" if p.get("is_video") else f"/image_by_md5/{md5}",
+                "filename": p["filename"], "created": p["created"], "faces": faces_simple, "is_video": p.get("is_video", False)
             })
-
-    # Sort results by date (newest first)
     results.sort(key=lambda x: x['created'], reverse=True)
     return jsonify(results)
+
+# --- UPDATE INGEST TO STORE GPS (Important for Map) ---
+# Update the ingest_data method inside ScannerThread class:
+# We need to monkey-patch or you should paste this inside the ScannerThread class in your file
+# For brevity, ensure the `ingest_data` method looks like this:
+
+# ... (Inside ScannerThread) ...
+#    def ingest_data(self, full_path, md5, faces, c_time, m_time, is_video):
+#        # ... existing ...
+#        # Extract GPS if not already in memory/cache to enable Map View
+#        gps_coords = None
+#        if not is_video:
+#             # Simple optimization: only extract if not already cached
+#             # For a robust app, we'd store this in profile.json. 
+#             # Here we do it on scan if missing.
+#             try:
+#                 img = Image.open(full_path)
+#                 gps_str = extract_gps(img)
+#                 if gps_str:
+#                     lat, lon = gps_str.split(',')
+#                     gps_coords = (float(lat), float(lon))
+#             except: pass
+#
+#        if md5 not in global_state["photos"]:
+#            global_state["photos"][md5] = {
+#                # ... existing ...
+#                "gps_coords": gps_coords 
+#            }
+# ...
 
 if __name__ == '__main__':
     multiprocessing.freeze_support()
