@@ -9,7 +9,8 @@ import datetime
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import cv2
 import numpy as np
-from flask import Flask, render_template, jsonify, request, send_file
+from flask import Flask, render_template, jsonify, request, send_file, session, redirect, url_for
+
 from sklearn.cluster import DBSCAN
 from sklearn.metrics.pairwise import cosine_distances
 
@@ -40,6 +41,9 @@ DET_THRESHOLD = 0.60
 MIN_FACE_SIZE = 40
 
 app = Flask(__name__, static_folder='static')
+app.secret_key = 'replace_this_with_a_random_secret_key'
+
+
 
 # --- GLOBAL STATE ---
 global_state = {
@@ -409,6 +413,53 @@ class ScannerThread(threading.Thread):
                     disk_face_list[f_idx]["manual"] = mem_face.get("manual", False)
                     disk_face_list[f_idx]["is_deleted"] = mem_face.get("is_deleted", False)
                     dirty_dirs.add(d)
+
+
+SETTINGS_FILE = "settings.json"
+
+def check_credentials(username, password):
+    # Create default if missing
+    if not os.path.exists(SETTINGS_FILE):
+        with open(SETTINGS_FILE, 'w') as f:
+            json.dump({"users": {"admin": "pass"}}, f, indent=4)
+    
+    try:
+        with open(SETTINGS_FILE, 'r') as f:
+            config = json.load(f)
+            users = config.get("users", {})
+            return users.get(username) == password
+    except:
+        return False
+
+@app.before_request
+def require_login():
+    # 1. Allowed endpoints (Login, Static files, Logout)
+    if request.endpoint in ['login', 'static', 'logout']:
+        return
+    
+    # 2. If user is logged in, proceed
+    if 'user' in session:
+        return
+
+    # 3. Otherwise, redirect to login
+    return redirect(url_for('login'))
+
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    if request.method == 'POST':
+        user = request.form.get('username')
+        pw = request.form.get('password')
+        if check_credentials(user, pw):
+            session['user'] = user
+            return redirect(url_for('index'))
+        return render_template('login.html', error="Invalid credentials")
+    return render_template('login.html')
+
+@app.route('/logout')
+def logout():
+    session.pop('user', None)
+    return redirect(url_for('login'))
+
 # --- ROUTES ---
 
 @app.route('/')
