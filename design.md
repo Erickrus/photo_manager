@@ -13,6 +13,18 @@
     "created": "2023-12-01 10:30:00",
     "modified": "2023-12-02 11:00:00",
     "is_video": false,
+    "comments": [
+      {
+        "text": "Great family dinner!",
+        "author": "admin",
+        "timestamp": "2023-12-25 18:30:00"
+      },
+      {
+        "text": "Check out the background.",
+        "author": "guest",
+        "timestamp": "2023-12-26 09:15:00"
+      }
+    ],
     "faces": [
       {
         "id": "123_456_789_101",
@@ -21,14 +33,6 @@
         "cluster_id": "a1b2c3d4-e5f6-...",
         "manual": false,
         "is_deleted": false
-      },
-      {
-        "id": "500_600_700_800",
-        "box": [500, 600, 700, 800],
-        "encoding": [0.98, -0.23, ...],
-        "cluster_id": "-1",
-        "manual": true,
-        "is_deleted": true
       }
     ]
   },
@@ -37,12 +41,18 @@
     "created": "...",
     "modified": "...",
     "is_video": true,
-    "faces": []
+    "faces": [],
+    "comments": []
   }
 }
 ```
 
 *   **`md5`**: The unique fingerprint of the file. If this changes, the system knows the file has been edited and re-scans it.
+*   **`comments`** (Optional): An array storing user feedback or descriptions for this specific photo. May not exist on older files.
+    *   **`text`**: The actual content of the comment. Used for semantic search.
+    *   **`author`**: The username of the account that posted the comment.
+    *   **`timestamp`**: The exact date and time the comment was added.
+
 *   **`faces`**: An array containing every face found in that specific image.
     *   **`id`**: A unique ID for the face *within this image*, generated from its coordinates. This is the **stable key** we use to identify a face for cropping.
     *   **`box`**: The raw `[top, right, bottom, left]` coordinates.
