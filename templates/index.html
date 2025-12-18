@@ -167,6 +167,15 @@
             .nav-arrow { width: 40px; font-size: 30px; }
         }
     
+        /* COMMENT STYLES */
+        .comment-section { margin-top: 20px; border-top: 1px solid #333; padding-top: 10px; }
+        .comment-list { display: flex; flex-direction: column; gap: 10px; margin-bottom: 10px; max-height: 200px; overflow-y: auto; }
+        .comment-item { background: #333; padding: 8px; border-radius: 6px; font-size: 0.9em; position: relative; }
+        .comment-meta { font-size: 0.75em; color: #aaa; margin-bottom: 2px; display: flex; justify-content: space-between; }
+        .comment-text { color: #eee; word-break: break-word; }
+        .comment-del { cursor: pointer; color: #ef4444; }
+        .comment-input-box { display: flex; gap: 5px; }
+        .comment-input-box input { margin: 0; background: #333; color: white; border: 1px solid #444; }
     </style>
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
     <script src="https://unpkg.com/leaflet.markercluster@1.4.1/dist/leaflet.markercluster.js"></script>
@@ -214,6 +223,15 @@
                     <a id="appleMapsLink" href="#" target="_blank" class="map-btn">Open in Maps</a>
                 </div>
                 <div id="dFaces" style="margin-top:20px"></div>
+                <!-- NEW COMMENT SECTION -->
+                <div class="comment-section">
+                    <h4 style="margin:0 0 10px 0">Comments</h4>
+                    <div id="dComments" class="comment-list"></div>
+                    <div class="comment-input-box">
+                        <input type="text" id="newCommentText" placeholder="Add comment..." onkeydown="if(event.key==='Enter') postComment()">
+                        <button class="btn btn-primary" onclick="postComment()">⏎</button>
+                    </div>
+                </div>
             </div>
         </div>
     </div>
@@ -459,6 +477,27 @@
                         mapC.style.display='none';
                         appleBtn.href = `http://maps.apple.com/?q=${encodeURIComponent(data.location)}`;
                     }
+
+                    // RENDER COMMENTS
+                    const cList = document.getElementById('dComments');
+                    cList.innerHTML = '';
+                    if (data.comments) {
+                        data.comments.forEach(c => {
+                            const div = document.createElement('div');
+                            div.className = 'comment-item';
+                            // Allow deleting if we are the author (simple client check, real check on server)
+                            const delBtn = `<span class="comment-del" onclick="deleteComment('${md5}', '${c.timestamp}')">×</span>`;
+                            div.innerHTML = `
+                                <div class="comment-meta">
+                                    <span>${c.author} • ${c.timestamp}</span>
+                                    ${delBtn}
+                                </div>
+                                <div class="comment-text">${c.text}</div>
+                            `;
+                            cList.appendChild(div);
+                        });
+                    }
+
                     // --- FIXED FACE LOGIC ---
                     let fHtml = '';
                     if (data.faces && data.faces.length > 0) {
@@ -497,7 +536,53 @@
         async function loadDirectories() { setToolbar('Albums');setActiveNav('nav-albums'); const d = await (await fetch('/api/directories')).json(); let h='<div class="grid">'; d.forEach(x=>h+=`<div style="cursor:pointer" onclick="loadPhotos('${x.name}')"><div class="album-card"><img src="${x.cover}" class="album-cover" loading="lazy"><div class="album-badge">${x.count}</div></div><div class="album-title">${x.name}</div></div>`); document.getElementById('content').innerHTML=h+'</div>'; }
         
         async function loadPhotos(folder) { const p = await (await fetch(`/api/photos_by_dir?folder=${encodeURIComponent(folder)}`)).json(); renderPhotoGrid(p, `<button class="btn btn-sec" onclick="loadDirectories()">⬅ Back</button> <b>${folder}</b>`); }
-        async function handleSearch(e) { if(e.key==='Enter'){ const q=document.getElementById('searchInput').value; if(q){ setActiveNav(''); const p = await (await fetch(`/api/search?q=${encodeURIComponent(q)}`)).json(); renderPhotoGrid(p, `Results: "${q}"`); }}}
+        async function handleSearch(e) {
+            if(e.key==='Enter'){
+                const q=document.getElementById('searchInput').value;
+                if(q){
+                    setActiveNav('');
+                    const p = await (await fetch(`/api/search?q=${encodeURIComponent(q)}`)).json(); 
+                    renderPhotoGrid(p, `Results: "${q}"`); 
+                } else {
+                    // Query is empty -> Go back to Albums
+                    loadDirectories();
+                }
+            }
+        }
+
+        async function postComment() {
+            if (currentIdx === -1) return;
+            const md5 = currentPlaylist[currentIdx].md5;
+            const txtInput = document.getElementById('newCommentText');
+            const text = txtInput.value.trim();
+            
+            if (!text) return;
+
+            const res = await fetch('/api/add_comment', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ md5: md5, text: text })
+            });
+            
+            const r = await res.json();
+            if (r.success) {
+                txtInput.value = '';
+                openViewer(md5); // Refresh sidebar
+            } else {
+                alert("Failed to post comment. Ensure you are logged in.");
+            }
+        }
+
+        async function deleteComment(md5, timestamp) {
+            if(!confirm("Delete comment?")) return;
+            await fetch('/api/delete_comment', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ md5: md5, timestamp: timestamp })
+            });
+            openViewer(md5); // Refresh
+        }
+
 
         // --- PEOPLE & SELECTION ---
         let isSel=false, selSet=new Set();

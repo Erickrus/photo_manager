@@ -193,7 +193,7 @@ class ScannerThread(threading.Thread):
                         if c.get("faces") and "id" not in c["faces"][0]: should_process = True
                         else:
                             should_process = False
-                            self.ingest_data(full_path, c["md5"], c["faces"], c.get("created"), c.get("modified"), c.get("is_video", False))
+                            self.ingest_data(full_path, c["md5"], c["faces"], c.get("created"), c.get("modified"), c.get("is_video", False), c.get("comments", []))
                     if should_process: files_to_process.append((full_path, root))
 
         global_state["status"]["total_files"] = all_files_count
@@ -208,24 +208,28 @@ class ScannerThread(threading.Thread):
                     global_state["status"]["progress"] = int((done / len(files_to_process))*80)
                     global_state["status"]["current_task"] = f"Processed {done}/{len(files_to_process)}"
                     if res and res["status"] == "success":
-                        self.ingest_data(res["full_path"], res["md5"], res["faces"], res["created"], res["modified"], res.get("is_video", False))
+                        self.ingest_data(res["full_path"], res["md5"], res["faces"], res["created"], res["modified"], res.get("is_video", False), [])
                         updates_by_dir[res["root_dir"]][res["filename"]] = {
                             "md5": res["md5"], "created": res["created"], "modified": res["modified"], 
-                            "faces": res["faces"], "is_video": res.get("is_video", False)
+                            "faces": res["faces"], "is_video": res.get("is_video", False),
+                            "comments": [] 
                         }
 
         for root, data in updates_by_dir.items():
             if data:
-                with open(os.path.join(root, "profile.json"), 'w') as f: json.dump(data, f, indent=4)
+                with open(os.path.join(root, "profile.json"), 'w') as f: json.dump(data, f, indent=4, ensure_ascii=False)
 
         self.perform_clustering(updates_by_dir)
         global_state["status"].update({"is_scanning": False, "progress": 100, "current_task": "Done"})
 
-    def ingest_data(self, full_path, md5, faces, c_time, m_time, is_video):
+    def ingest_data(self, full_path, md5, faces, c_time, m_time, is_video, comments=None):
         global_state["path_map"][full_path] = md5
         folder = os.path.basename(os.path.dirname(full_path))
         parts = folder.split('_')
         location = "_".join(parts[1:]) if len(parts) > 1 else folder
+        
+        # Default to empty list if None
+        if comments is None: comments = []
 
         for f in faces:
             if "id" not in f and "box" in f:
@@ -233,8 +237,6 @@ class ScannerThread(threading.Thread):
                  f["id"] = f"{b[0]}_{b[1]}_{b[2]}_{b[3]}"
 
         gps_coords = None
-        # Try to read GPS if we don't have it (simplified for this demo)
-        # In production, save this to profile.json to avoid re-reading images
         if not is_video:
             try:
                 img = Image.open(full_path)
@@ -250,7 +252,8 @@ class ScannerThread(threading.Thread):
                 "folder": folder, "created": c_time, "modified": m_time, 
                 "filename": os.path.basename(full_path),
                 "is_video": is_video,
-                "gps_coords": gps_coords
+                "gps_coords": gps_coords,
+                "comments": comments  # <--- STORE COMMENTS
             }
         if full_path not in global_state["photos"][md5]["paths"]:
             global_state["photos"][md5]["paths"].append(full_path)
@@ -394,7 +397,7 @@ class ScannerThread(threading.Thread):
         for d in dirty_dirs:
             p_path = os.path.join(d, "profile.json")
             if d in updates_by_dir:
-                with open(p_path, 'w') as f: json.dump(updates_by_dir[d], f, indent=4)
+                with open(p_path, 'w') as f: json.dump(updates_by_dir[d], f, indent=4, ensure_ascii=False)
 
     def _mark_dirty(self, md5, f_idx, updates_by_dir, dirty_dirs):
         """Helper to update the disk write buffer"""
@@ -751,7 +754,8 @@ def details(md5):
     return jsonify({
         "filename": p["filename"], "folder": p["folder"], "location": p["location"],
         "gps": gps, "created": p["created"], "exif": exif, "faces": faces, 
-        "full_path_id": md5, "is_video": p.get("is_video", False)
+        "full_path_id": md5, "is_video": p.get("is_video", False),
+        "comments": p.get("comments", [])
     })
 
 # --- DATA MANIPULATION (Keep existing remove/delete/update/merge routes) ---
@@ -804,17 +808,37 @@ def save_profile_for_md5(md5):
         path = global_state["photos"][md5]["paths"][0]
         d_path = os.path.dirname(path)
         p_path = os.path.join(d_path, "profile.json")
+        fname = os.path.basename(path)
+        
         try:
-            with open(p_path, 'r') as f: data = json.load(f)
-            fname = os.path.basename(path)
-            if fname in data:
-                mem_faces = global_state["photos"][md5]["faces"]
+            data = {}
+            if os.path.exists(p_path):
+                with open(p_path, 'r') as f: data = json.load(f)
+            
+            if fname not in data: data[fname] = {}
+            
+            # Sync Faces
+            mem_faces = global_state["photos"][md5]["faces"]
+            # Ensure the structure exists in data
+            if "faces" not in data[fname]: data[fname]["faces"] = mem_faces
+            else:
+                # Merge updates (clustering IDs)
                 for mf in mem_faces:
+                    found = False
                     for df in data[fname]["faces"]:
                         if "id" in df and df["id"] == mf["id"]:
-                            df["cluster_id"] = mf["cluster_id"]; df["manual"] = mf["manual"]; df.get("is_deleted", False)
-            with open(p_path, 'w') as f: json.dump(data, f, indent=4)
-        except: pass
+                            df["cluster_id"] = mf["cluster_id"]
+                            df["manual"] = mf["manual"]
+                            df["is_deleted"] = mf.get("is_deleted", False)
+                            found = True
+                    if not found: data[fname]["faces"].append(mf)
+
+            # Sync Comments (Memory is source of truth for comments)
+            data[fname]["comments"] = global_state["photos"][md5].get("comments", [])
+
+            with open(p_path, 'w') as f: json.dump(data, f, indent=4, ensure_ascii=False)
+        except Exception as e: 
+            print(f"Error saving profile: {e}")
 
 def load_people_db():
     if os.path.exists(PEOPLE_DB_FILE):
@@ -831,7 +855,14 @@ def search():
     people_map = {cid: p['name'].lower() for cid, p in global_state['people'].items() if not p.get('is_deleted')}
     for md5, p in global_state["photos"].items():
         match = False
-        if (query in p['filename'].lower() or query in p['location'].lower() or query in p['folder'].lower() or query in p['created']): match = True
+        comment_text = " ".join([c["text"].lower() for c in p.get("comments", [])])
+        if (query in p['filename'].lower() or 
+            query in p['location'].lower() or 
+            query in p['folder'].lower() or 
+            query in p['created'] or
+            query in comment_text
+        ): 
+            match = True
         if not match:
             for face in p['faces']:
                 cid = face['cluster_id']
@@ -932,6 +963,49 @@ def assign_face():
         save_profile_for_md5(md5)
 
     return jsonify({"success": True})
+
+@app.route('/api/add_comment', methods=['POST'])
+def add_comment():
+    if 'user' not in session: return jsonify({"error": "Login required"}), 401
+    
+    d = request.json
+    md5 = d.get('md5')
+    text = d.get('text')
+    
+    if md5 in global_state["photos"] and text:
+        new_comment = {
+            "text": text,
+            "author": session['user'],
+            "timestamp": datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        }
+        
+        if "comments" not in global_state["photos"][md5]:
+            global_state["photos"][md5]["comments"] = []
+            
+        global_state["photos"][md5]["comments"].append(new_comment)
+        
+        save_profile_for_md5(md5)
+        return jsonify({"success": True, "comment": new_comment})
+        
+    return jsonify({"success": False})
+
+@app.route('/api/delete_comment', methods=['POST'])
+def delete_comment():
+    if 'user' not in session: return jsonify({"error": "Login required"}), 401
+    d = request.json
+    md5 = d.get('md5')
+    timestamp = d.get('timestamp')
+    
+    if md5 in global_state["photos"]:
+        comments = global_state["photos"][md5].get("comments", [])
+        # Filter out the comment with matching timestamp/author (simple identifier)
+        global_state["photos"][md5]["comments"] = [
+            c for c in comments 
+            if not (c['timestamp'] == timestamp and c['author'] == session['user'])
+        ]
+        save_profile_for_md5(md5)
+        return jsonify({"success": True})
+    return jsonify({"success": False})
 
 if __name__ == '__main__':
     multiprocessing.freeze_support()
