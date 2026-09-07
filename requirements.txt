@@ -1,9 +1,12 @@
 # Web Framework
 Flask
+requests
 # Image Processing & Manipulation
 opencv-python
 Pillow
 numpy
+# OCR (macOS native Vision framework via ocrmac)
+ocrmac
 # Face Recognition & AI
 insightface
 onnxruntime
